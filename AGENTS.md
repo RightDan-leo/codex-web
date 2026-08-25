@@ -1,7 +1,6 @@
-# Repository guidelines
+# Repository guidance
 
-- Keep the public tenant worker as the default execution path.
-- Remote execution must use an explicit logical project id; never accept a server-supplied host path.
-- Do not expose worker control tokens to Codex app-server or spawned shell commands.
-- Persist a conversation's executor target and fail closed when a selected remote project is offline.
-- Run `npm test` before merging changes.
+- Keep the public edition free of credentials, private hosts, personal account IDs, and production-only deployment details.
+- Preserve server-side persistence for queued prompts, attachments, messages, events, and Codex threads.
+- Maintain the separation between the web UID and the tenant worker UID.
+- Run `npm test` before submitting changes.
