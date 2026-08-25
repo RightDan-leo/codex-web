@@ -3,6 +3,8 @@ import path from "node:path";
 import pino from "pino";
 import { createApp } from "./app.js";
 import { assertProductionConfig } from "./config.js";
+import { RemoteExecutorStore } from "./remote-executor-store.js";
+import { installRemoteRunnerRouting } from "./remote-runner-routing.js";
 import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
 
 const { app, db, config, runner, beginShutdown } = createApp();
@@ -16,6 +18,11 @@ const remoteWorkerService = remoteWorkerToken
       path: process.env.REMOTE_WORKER_PATH || "/codex-worker",
     })
   : undefined;
+const remoteExecutorStore = new RemoteExecutorStore(db);
+installRemoteRunnerRouting(runner, db, {
+  store: remoteExecutorStore,
+  gateway: remoteWorkerService?.gateway,
+});
 
 const server = app.listen(config.port, config.host, () => {
   logger.info({
@@ -33,7 +40,6 @@ async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   beginShutdown();
-  remoteWorkerService?.close();
   logger.info({ signal }, "Codex Web stopping");
   const deadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
   while ((db.runningJobCount() > 0 || runner.activeJobCount > 0) && Date.now() < deadline) {
@@ -44,6 +50,7 @@ async function shutdown(signal: string): Promise<void> {
     logger.error({ remainingJobs, activeExecutions: runner.activeJobCount }, "Shutdown drain timed out");
     process.exit(1);
   }
+  remoteWorkerService?.close();
   logger.info("Running jobs drained; closing network services");
   server.close(() => {
     db.close();
