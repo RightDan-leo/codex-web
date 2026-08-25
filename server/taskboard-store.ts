@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { AppDatabase } from "./db.js";
+import type { AppDatabase, JobRow, StoredAgentSelection } from "./db.js";
 import {
   canTransitionTask,
   type TaskboardPriority,
@@ -40,6 +40,7 @@ export type TaskboardTaskRow = {
   acceptance_criteria: string;
   position: number;
   conversation_id: string | null;
+  active_job_id: string | null;
   executor_kind: "tenant" | "remote";
   remote_project_id: string | null;
   version: number;
@@ -62,6 +63,17 @@ export type TaskboardEventRow = {
   event_type: string;
   payload: string;
   created_at: string;
+};
+
+export type TaskboardExecution = {
+  jobId: string;
+  status: JobRow["status"];
+};
+
+export type StartedTaskboardTask = {
+  task: TaskboardTaskRow;
+  job: JobRow;
+  conversationId: string;
 };
 
 export class TaskboardValidationError extends Error {}
@@ -103,7 +115,9 @@ type UpdateTaskInput = {
 };
 
 export class TaskboardStore {
-  constructor(private readonly db: AppDatabase) {}
+  constructor(private readonly db: AppDatabase) {
+    this.reconcileTerminalExecutions();
+  }
 
   listProjects(userId: string, includeArchived = false): TaskboardProjectRow[] {
     return this.db.sqlite.prepare(`
@@ -210,6 +224,16 @@ export class TaskboardStore {
     `).get(id, userId) as TaskboardTaskRow | undefined;
   }
 
+  getTaskExecution(id: string, userId: string): TaskboardExecution | null {
+    const task = this.requireTask(id, userId, true);
+    if (!task.conversation_id) return null;
+    const job = this.db.sqlite.prepare(`
+      SELECT id,status FROM jobs WHERE conversation_id=?
+      ORDER BY id=? DESC,created_at DESC,id DESC LIMIT 1
+    `).get(task.conversation_id, task.active_job_id ?? "") as { id: string; status: JobRow["status"] } | undefined;
+    return job ? { jobId: job.id, status: job.status } : null;
+  }
+
   createTask(projectId: string, userId: string, input: CreateTaskInput): TaskboardTaskRow {
     const project = this.requireProject(projectId, userId);
     if (input.parentTaskId) this.requireTaskInProject(input.parentTaskId, projectId, userId);
@@ -222,8 +246,8 @@ export class TaskboardStore {
       this.db.sqlite.prepare(`
         INSERT INTO taskboard_tasks(
           id,project_id,parent_task_id,title,description,status,priority,risk,estimate_points,acceptance_criteria,
-          position,conversation_id,executor_kind,remote_project_id,version,archived_at,created_at,updated_at
-        ) VALUES(?,?,?,?,?,'backlog',?,?,?,?,?,?,?, ?,1,NULL,?,?)
+          position,conversation_id,active_job_id,executor_kind,remote_project_id,version,archived_at,created_at,updated_at
+        ) VALUES(?,?,?,?,?,'backlog',?,?,?,?,?,?,NULL,?, ?,1,NULL,?,?)
       `).run(
         id, projectId, input.parentTaskId ?? null, input.title, input.description, input.priority, input.risk,
         input.estimatePoints ?? null, input.acceptanceCriteria, nextPosition, input.conversationId ?? null,
@@ -326,6 +350,121 @@ export class TaskboardStore {
     return this.getTask(id, userId, true)!;
   }
 
+  startTask(id: string, userId: string, version: number, selection: StoredAgentSelection): StartedTaskboardTask {
+    const task = this.requireTask(id, userId);
+    if (task.version !== version) throw new TaskboardConflictError("任务已被其他操作更新，请刷新后重试。");
+    const recoveringFalseRunning = task.status === "running" && !task.conversation_id;
+    if (task.status !== "ready" && !recoveringFalseRunning) {
+      throw new TaskboardConflictError("只有待开发任务可以启动；正在运行的任务不会重复执行。");
+    }
+    const blocked = this.db.sqlite.prepare(`
+      SELECT dependency.title FROM taskboard_task_dependencies relation
+      JOIN taskboard_tasks dependency ON dependency.id=relation.depends_on_task_id
+      WHERE relation.task_id=? AND dependency.status<>'done' LIMIT 1
+    `).get(id) as { title: string } | undefined;
+    if (blocked) throw new TaskboardConflictError(`前置任务尚未完成：${blocked.title}`);
+
+    const project = this.requireProject(task.project_id, userId);
+    const activeInProject = this.db.sqlite.prepare(`
+      SELECT count(1) AS count FROM taskboard_tasks queued
+      JOIN jobs job ON job.id=queued.active_job_id
+      WHERE queued.project_id=? AND queued.id<>? AND queued.status='running'
+        AND queued.archived_at IS NULL AND job.status IN ('queued','running')
+    `).get(task.project_id, task.id) as { count: number };
+    if (activeInProject.count >= project.max_concurrency) {
+      throw new TaskboardConflictError(`项目并发上限为 ${project.max_concurrency}，请等待正在执行的任务完成。`);
+    }
+    const conversationId = task.conversation_id ?? crypto.randomUUID();
+    if (task.conversation_id) {
+      this.validateConversation(project, conversationId, userId);
+      const active = this.db.sqlite.prepare(`
+        SELECT 1 AS found FROM jobs WHERE conversation_id=? AND status IN ('queued','running') LIMIT 1
+      `).get(conversationId) as { found: number } | undefined;
+      if (active) throw new TaskboardConflictError("任务已经排队或正在执行，不会重复启动。");
+    }
+    const messageId = crypto.randomUUID();
+    const jobId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const position = this.nextPosition(task.project_id, "running");
+    const prompt = buildTaskboardPrompt(task);
+    this.db.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      if (!task.conversation_id) {
+        this.db.sqlite.prepare(`
+          INSERT INTO conversations(
+            id,user_id,title,title_source,agent_model,reasoning_effort,status,has_unread_result,
+            archived_at,deleted_at,created_at,updated_at
+          ) VALUES(?,?,?,'manual',?,?,'idle',0,NULL,NULL,?,?)
+        `).run(conversationId, userId, task.title, selection.model, selection.reasoningEffort, now, now);
+        if (task.executor_kind === "remote") {
+          this.db.sqlite.prepare(`
+            INSERT INTO conversation_executors(conversation_id,kind,project_id,updated_at)
+            VALUES(?,'remote',?,?)
+          `).run(conversationId, task.remote_project_id, now);
+        }
+      }
+      this.db.sqlite.prepare(`
+        INSERT INTO messages(id,conversation_id,role,content,quote_excerpt,created_at)
+        VALUES(?,?,'user',?,NULL,?)
+      `).run(messageId, conversationId, prompt, now);
+      const nextQueue = this.db.sqlite.prepare("SELECT COALESCE(MAX(queue_seq),0)+1 AS value FROM jobs").get() as { value: number };
+      this.db.sqlite.prepare(`
+        INSERT INTO jobs(
+          id,conversation_id,message_id,agent_model,reasoning_effort,queue_seq,status,error,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,'queued',NULL,?,?)
+      `).run(jobId, conversationId, messageId, selection.model, selection.reasoningEffort, nextQueue.value, now, now);
+      this.db.sqlite.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(now, conversationId);
+      const updated = this.db.sqlite.prepare(`
+        UPDATE taskboard_tasks SET conversation_id=?,active_job_id=?,status='running',position=?,version=version+1,updated_at=?
+        WHERE id=? AND version=? AND archived_at IS NULL
+      `).run(conversationId, jobId, position, now, id, version);
+      if (updated.changes !== 1) throw new TaskboardConflictError("任务已被其他操作更新，请刷新后重试。");
+      this.appendEvent(task.project_id, id, userId, "task.started", { conversationId, jobId }, now);
+      this.db.sqlite.prepare("UPDATE taskboard_projects SET version=version+1,updated_at=? WHERE id=?").run(now, task.project_id);
+      this.db.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.db.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+    return { task: this.requireTask(id, userId), job: this.db.getJob(jobId)!, conversationId };
+  }
+
+  settleTaskForJob(jobId: string): TaskboardTaskRow | null {
+    const job = this.db.getJob(jobId);
+    if (!job || !["completed", "failed", "cancelled", "interrupted"].includes(job.status)) return null;
+    const task = this.db.sqlite.prepare(`
+      SELECT task.*,project.user_id AS owner_user_id FROM taskboard_tasks task
+      JOIN taskboard_projects project ON project.id=task.project_id
+      WHERE task.active_job_id=? AND task.conversation_id=? AND task.status='running'
+        AND task.archived_at IS NULL AND project.archived_at IS NULL
+      LIMIT 1
+    `).get(jobId, job.conversation_id) as (TaskboardTaskRow & { owner_user_id: string }) | undefined;
+    if (!task) return null;
+    const status: TaskboardStatus = job.status === "completed" ? "review" : "blocked";
+    const now = new Date().toISOString();
+    const position = this.nextPosition(task.project_id, status);
+    this.db.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const updated = this.db.sqlite.prepare(`
+        UPDATE taskboard_tasks SET status=?,active_job_id=NULL,position=?,version=version+1,updated_at=?
+        WHERE id=? AND version=? AND status='running' AND active_job_id=? AND archived_at IS NULL
+      `).run(status, position, now, task.id, task.version, jobId);
+      if (updated.changes !== 1) {
+        this.db.sqlite.exec("ROLLBACK");
+        return null;
+      }
+      this.appendEvent(task.project_id, task.id, task.owner_user_id, "task.execution_settled", {
+        jobId, jobStatus: job.status, taskStatus: status,
+      }, now);
+      this.db.sqlite.prepare("UPDATE taskboard_projects SET version=version+1,updated_at=? WHERE id=?").run(now, task.project_id);
+      this.db.sqlite.exec("COMMIT");
+    } catch (error) {
+      try { this.db.sqlite.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+    return this.db.sqlite.prepare("SELECT * FROM taskboard_tasks WHERE id=?").get(task.id) as TaskboardTaskRow;
+  }
+
   transitionTask(id: string, userId: string, version: number, to: TaskboardStatus, reason = ""): TaskboardTaskRow {
     const task = this.requireTask(id, userId);
     if (task.version !== version) throw new TaskboardConflictError("任务已被其他操作更新，请刷新后重试。");
@@ -333,12 +472,13 @@ export class TaskboardStore {
       throw new TaskboardValidationError(`不允许从 ${task.status} 切换到 ${to}。`);
     }
     if (to === "running") {
-      const blocked = this.db.sqlite.prepare(`
-        SELECT dependency.title FROM taskboard_task_dependencies relation
-        JOIN taskboard_tasks dependency ON dependency.id=relation.depends_on_task_id
-        WHERE relation.task_id=? AND dependency.status<>'done' LIMIT 1
-      `).get(id) as { title: string } | undefined;
-      if (blocked) throw new TaskboardConflictError(`前置任务尚未完成：${blocked.title}`);
+      throw new TaskboardConflictError("进入开发中必须真实启动 Codex，请使用启动任务操作。");
+    }
+    if (task.status === "running" && task.active_job_id) {
+      const job = this.db.getJob(task.active_job_id);
+      if (job && ["queued", "running"].includes(job.status)) {
+        throw new TaskboardConflictError("Codex 仍在执行；请先停止工作会话，系统会把任务转为已阻塞。");
+      }
     }
     const now = new Date().toISOString();
     const position = this.nextPosition(task.project_id, to);
@@ -492,4 +632,27 @@ export class TaskboardStore {
       VALUES(?,?,?,?,?,?)
     `).run(projectId, taskId, actorUserId, eventType, JSON.stringify(payload), createdAt);
   }
+
+  private reconcileTerminalExecutions(): void {
+    const jobs = this.db.sqlite.prepare(`
+      SELECT job.id FROM jobs job
+      JOIN taskboard_tasks task ON task.active_job_id=job.id
+      WHERE task.status='running' AND job.status IN ('completed','failed','cancelled','interrupted')
+    `).all() as Array<{ id: string }>;
+    for (const job of jobs) this.settleTaskForJob(job.id);
+  }
+}
+
+export function buildTaskboardPrompt(task: TaskboardTaskRow): string {
+  return [
+    "请执行以下智能项目看板任务。",
+    `任务：${task.title}`,
+    task.description ? `说明：${task.description}` : "",
+    task.acceptance_criteria ? `验收标准：${task.acceptance_criteria}` : "",
+    "要求：",
+    "- 只在当前执行器已经配置的项目范围内工作。",
+    "- 先检查现有代码和约束，再实施修改并运行相关测试。",
+    "- 完成后说明修改、验证结果和仍存在的限制。",
+    "- 不要自行把任务标记为验收通过；最终验收由 Owner 完成。",
+  ].filter(Boolean).join("\n");
 }

@@ -10,7 +10,7 @@ export type TaskboardRisk = typeof TASKBOARD_RISKS[number];
 const ALLOWED_TRANSITIONS: Record<TaskboardStatus, ReadonlySet<TaskboardStatus>> = {
   backlog: new Set(["ready", "cancelled"]),
   ready: new Set(["backlog", "running", "blocked", "cancelled"]),
-  running: new Set(["review", "blocked", "cancelled"]),
+  running: new Set(["review", "blocked"]),
   review: new Set(["ready", "done", "cancelled"]),
   blocked: new Set(["ready", "cancelled"]),
   done: new Set(),

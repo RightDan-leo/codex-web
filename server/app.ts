@@ -86,8 +86,14 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     if (conversation.agent_model || conversation.reasoning_effort) conversationAgentSelection(conversation);
   }
 
+  const taskboardStore = new TaskboardStore(db);
+
   function publish(jobId: string, eventType: string, payload: unknown): void {
     const seq = db.appendEvent(jobId, eventType, payload);
+    if (["done", "failed"].includes(eventType)) {
+      try { taskboardStore.settleTaskForJob(jobId); }
+      catch { /* Taskboard reconciliation must never change the primary job result. */ }
+    }
     const livePayload = {
       ...(payload && typeof payload === "object" ? payload : { payload }),
       created_at: new Date().toISOString(),
@@ -104,7 +110,6 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
   const tenantRunner = new CodexRunner(config, db, publish);
   const remoteWorkerGateway = new RemoteWorkerGateway();
   const remoteExecutorStore = new RemoteExecutorStore(db);
-  const taskboardStore = new TaskboardStore(db);
   const runner = new RemoteRoutingRunner(tenantRunner, db, {
     store: remoteExecutorStore,
     gateway: remoteWorkerGateway,
@@ -373,7 +378,16 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     return next();
   });
 
-  installTaskboardApiRoutes(api, taskboardStore, remoteWorkerGateway);
+  installTaskboardApiRoutes(api, taskboardStore, remoteWorkerGateway, {
+    selectionForTask: (task, userId) => {
+      const conversation = task.conversation_id ? db.getConversationForUser(task.conversation_id, userId) : undefined;
+      return conversation ? conversationAgentSelection(conversation) : userAgentSelection(userId);
+    },
+    onJobQueued: () => {
+      publishQueuePositions();
+      if (config.queueAutoStart) setImmediate(() => void pumpQueue());
+    },
+  });
 
   api.post("/auth/logout", (req, res) => {
     const token = req.cookies?.[COOKIE_NAME];

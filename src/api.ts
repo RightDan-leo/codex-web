@@ -74,6 +74,8 @@ export type TaskboardTask = {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  executionStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | null;
+  jobId: string | null;
   allowedTransitions: TaskboardStatus[];
 };
 export type TaskboardDependency = { task_id: string; depends_on_task_id: string; created_at: string };
@@ -197,6 +199,10 @@ export const api = {
   archiveTaskboardTask: (id: string, version: number) => request<{ task: TaskboardTask }>(
     `/taskboard/tasks/${id}`, { method: "DELETE", body: JSON.stringify({ version }) },
   ),
+  startTaskboardTask: (id: string, version: number) => request<{
+    task: TaskboardTask;
+    job: { id: string; status: string; conversationId: string };
+  }>(`/taskboard/tasks/${id}/start`, { method: "POST", body: JSON.stringify({ version }) }),
   transitionTaskboardTask: (id: string, version: number, status: TaskboardStatus, reason = "") => request<{ task: TaskboardTask }>(
     `/taskboard/tasks/${id}/transition`, { method: "POST", body: JSON.stringify({ version, status, reason }) },
   ),

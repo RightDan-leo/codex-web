@@ -23,6 +23,8 @@ const task: TaskboardTask = {
   archivedAt: null,
   createdAt: "2026-08-25T00:00:00.000Z",
   updatedAt: "2026-08-25T00:00:00.000Z",
+  executionStatus: null,
+  jobId: null,
   allowedTransitions: ["ready", "done", "cancelled"],
 };
 
@@ -50,10 +52,15 @@ test("task draft preserves acceptance authority and transition copy is explicit"
 
 test("taskboard is rendered inside the main React app and hides the chat composer", () => {
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
+  const serverAppSource = fs.readFileSync(path.join(process.cwd(), "server", "app.ts"), "utf8");
+  const pageSource = fs.readFileSync(path.join(process.cwd(), "src", "TaskboardPage.tsx"), "utf8");
   const styles = fs.readFileSync(path.join(process.cwd(), "src", "taskboard.css"), "utf8");
   assert.match(appSource, /workspaceView === "taskboard" \? <TaskboardPage/);
   assert.match(appSource, /workspaceView === "chat" && \(!selectedId/);
   assert.match(appSource, /className={`taskboard-sidebar-button/);
   assert.match(styles, /\.taskboard-columns \{[^}]*overflow-x: auto;/);
   assert.match(styles, /@media \(max-width: 720px\)/);
+  assert.match(pageSource, /startTaskboardTask/);
+  assert.match(pageSource, /立即启动开发/);
+  assert.match(serverAppSource, /taskboardStore\.settleTaskForJob\(jobId\)/);
 });

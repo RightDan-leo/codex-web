@@ -83,6 +83,19 @@ export function TaskboardPage({
     return () => { active = false; };
   }, [selectedProjectId]);
 
+  useEffect(() => {
+    if (!selectedProjectId || !detail?.tasks.some((task) => task.status === "running")) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      void api.taskboardProject(selectedProjectId).then((value) => {
+        if (!active) return;
+        setDetail(value);
+        setProjects((current) => current.map((project) => project.id === value.project.id ? value.project : project));
+      }).catch(() => undefined);
+    }, 2_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [selectedProjectId, detail?.tasks.some((task) => task.status === "running")]);
+
   const selectedTask = detail?.tasks.find((task) => task.id === selectedTaskId) ?? null;
   const online = detail ? executorOnline(detail.project.executor, workers) : true;
 
@@ -119,12 +132,29 @@ export function TaskboardPage({
 
   async function transition(task: TaskboardTask, status: TaskboardStatus, reason = "") {
     if (!task.allowedTransitions.includes(status)) return;
+    if (status === "running") { await startTask(task); return; }
     setBusy(true); setError("");
     try {
       await api.transitionTaskboardTask(task.id, task.version, status, reason);
       await refresh(task.projectId);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "任务状态更新失败");
+      await refresh(task.projectId).catch(() => undefined);
+    } finally { setBusy(false); }
+  }
+
+  async function startTask(task: TaskboardTask) {
+    if (!executorOnline(task.executor, workers)) {
+      setError("任务对应的远端项目当前离线；不会回退到 Tenant。");
+      return;
+    }
+    if (!window.confirm(`启动“${task.title}”？系统会立即创建持久任务并交给 Codex 执行。`)) return;
+    setBusy(true); setError("");
+    try {
+      await api.startTaskboardTask(task.id, task.version);
+      await refresh(task.projectId);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "任务启动失败");
       await refresh(task.projectId).catch(() => undefined);
     } finally { setBusy(false); }
   }
@@ -272,7 +302,7 @@ export function TaskboardPage({
     {taskFormOpen && detail && <TaskForm detail={detail} busy={busy} onCancel={() => setTaskFormOpen(false)} onSubmit={createTask} />}
     {selectedTask && detail && <TaskDetailDialog key={`${selectedTask.id}:${selectedTask.version}`} task={selectedTask} detail={detail} busy={busy}
       online={executorOnline(selectedTask.executor, workers)} onClose={() => setSelectedTaskId(null)} onSave={saveTask}
-      onSaveDependencies={saveDependencies} onTransition={transition} onArchive={archiveTask} onOpenConversation={openWorkConversation} />}
+      onSaveDependencies={saveDependencies} onTransition={transition} onStart={startTask} onArchive={archiveTask} onOpenConversation={openWorkConversation} />}
   </section>;
 }
 
@@ -308,6 +338,7 @@ function TaskCard({ task, detail, dragging, onDragStart, onOpen }: {
         {dependencies.length > 0 && <span><GitBranch size={12} />{dependencies.length} 个依赖</span>}
         {task.estimatePoints && <span>{task.estimatePoints} 点</span>}
         {task.conversationId && <span><ExternalLink size={12} />已关联会话</span>}
+        {task.status === "running" && <span className={`execution-${task.executionStatus ?? "missing"}`}><Bot size={12} />{executionLabel(task.executionStatus)}</span>}
       </span>
     </button>
   </article>;
@@ -381,7 +412,7 @@ function TaskForm({ detail, busy, onCancel, onSubmit }: {
   </div>;
 }
 
-function TaskDetailDialog({ task, detail, busy, online, onClose, onSave, onSaveDependencies, onTransition, onArchive, onOpenConversation }: {
+function TaskDetailDialog({ task, detail, busy, online, onClose, onSave, onSaveDependencies, onTransition, onStart, onArchive, onOpenConversation }: {
   task: TaskboardTask;
   detail: TaskboardProjectDetail;
   busy: boolean;
@@ -390,6 +421,7 @@ function TaskDetailDialog({ task, detail, busy, online, onClose, onSave, onSaveD
   onSave: (task: TaskboardTask, input: UpdateTaskInput) => void;
   onSaveDependencies: (task: TaskboardTask, dependencyIds: string[]) => void;
   onTransition: (task: TaskboardTask, status: TaskboardStatus, reason?: string) => void;
+  onStart: (task: TaskboardTask) => void;
   onArchive: (task: TaskboardTask) => void;
   onOpenConversation: (task: TaskboardTask) => void;
 }) {
@@ -420,7 +452,8 @@ function TaskDetailDialog({ task, detail, busy, online, onClose, onSave, onSaveD
       <div className="taskboard-dialog-actions">
         <button type="button" className="taskboard-secondary-button" disabled={busy || !metadataDirty || !title.trim()} onClick={() => onSave(task, { title, description, acceptanceCriteria: criteria, priority, risk })}>保存内容</button>
         <button type="button" className="taskboard-secondary-button" disabled={busy || !dependenciesDirty || !dependenciesEditable} onClick={() => onSaveDependencies(task, dependencyIds)}>保存依赖</button>
-        <button type="button" className="taskboard-work-button" disabled={busy || !online} onClick={() => onOpenConversation(task)}>{task.conversationId ? <ExternalLink size={15} /> : <Bot size={15} />}{task.conversationId ? "打开工作会话" : "建立工作会话"}</button>
+        {!(task.status === "running" && !task.executionStatus) && <button type="button" className="taskboard-work-button" disabled={busy || !online} onClick={() => onOpenConversation(task)}>{task.conversationId ? <ExternalLink size={15} /> : <Bot size={15} />}{task.conversationId ? "打开工作会话" : "建立工作会话"}</button>}
+        {task.status === "running" && !task.executionStatus && <button type="button" className="taskboard-start-button" disabled={busy || !online} onClick={() => onStart(task)}><Bot size={15} />立即启动开发</button>}
       </div>
       <div className="taskboard-transition-actions">
         {task.allowedTransitions.map((status) => <button type="button" key={status} disabled={busy} className={status === "done" ? "accept" : status === "cancelled" ? "danger" : ""} onClick={() => onTransition(task, status)}>{transitionLabel(task.status, status)}<ArrowRight size={14} /></button>)}
@@ -439,4 +472,14 @@ function executorLabel(target: ExecutorTarget, workers: RemoteWorkerStatus[]): s
     if (project) return `${project.name} · ${worker.displayName}`;
   }
   return `${target.projectId} · 离线`;
+}
+
+function executionLabel(status: TaskboardTask["executionStatus"]): string {
+  if (status === "queued") return "已进入持久队列";
+  if (status === "running") return "Codex 正在执行";
+  if (status === "completed") return "执行完成";
+  if (status === "failed") return "执行失败";
+  if (status === "cancelled") return "执行已取消";
+  if (status === "interrupted") return "执行已中断";
+  return "尚未真正启动";
 }

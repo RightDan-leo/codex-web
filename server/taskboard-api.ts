@@ -1,5 +1,6 @@
 import type { Router, Response } from "express";
 import type { SessionRow } from "./db.js";
+import type { StoredAgentSelection } from "./db.js";
 import type { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import {
   TaskboardConflictError,
@@ -7,6 +8,7 @@ import {
   TaskboardStore,
   TaskboardValidationError,
   type TaskboardExecutorTarget,
+  type TaskboardTaskRow,
 } from "./taskboard-store.js";
 import {
   isTaskboardPriority,
@@ -21,6 +23,10 @@ export function installTaskboardApiRoutes(
   api: Router,
   store: TaskboardStore,
   gateway: RemoteWorkerGateway,
+  options: {
+    selectionForTask: (task: TaskboardTaskRow, userId: string) => StoredAgentSelection;
+    onJobQueued: () => void;
+  },
 ): void {
   api.get("/taskboard/projects", (_req, res) => {
     const session = requireOwner(res);
@@ -57,7 +63,7 @@ export function installTaskboardApiRoutes(
       const dependencies = store.listDependencies(project.id, session.user_id);
       return res.json({
         project: serializeProject(project),
-        tasks: tasks.map((task) => ({ ...serializeTask(task), allowedTransitions: transitionTargets(task.status) })),
+        tasks: tasks.map((task) => serializeTaskWithState(store, task, session.user_id)),
         dependencies,
       });
     } catch (error) {
@@ -113,7 +119,7 @@ export function installTaskboardApiRoutes(
         acceptanceCriteria: readOptionalText(req.body?.acceptanceCriteria, "验收标准", 15_000),
         conversationId: readNullableId(req.body?.conversationId, "关联会话"),
       });
-      return res.status(201).json({ task: { ...serializeTask(task), allowedTransitions: transitionTargets(task.status) } });
+      return res.status(201).json({ task: serializeTaskWithState(store, task, session.user_id) });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -153,7 +159,28 @@ export function installTaskboardApiRoutes(
       if (Object.hasOwn(req.body ?? {}, "conversationId")) input.conversationId = readNullableId(req.body.conversationId, "关联会话");
       if (Object.keys(input).length === 0) throw new TaskboardValidationError("没有可更新的任务字段。");
       const task = store.updateTask(String(req.params.id), session.user_id, readVersion(req.body?.version), input);
-      return res.json({ task: { ...serializeTask(task), allowedTransitions: transitionTargets(task.status) } });
+      return res.json({ task: serializeTaskWithState(store, task, session.user_id) });
+    } catch (error) {
+      return sendTaskboardError(res, error);
+    }
+  });
+
+  api.post("/taskboard/tasks/:id/start", (req, res) => {
+    const session = requireOwner(res);
+    if (!session) return;
+    try {
+      const id = String(req.params.id);
+      const task = store.getTask(id, session.user_id);
+      if (!task) throw new TaskboardNotFoundError("任务不存在。");
+      if (task.executor_kind === "remote" && (!task.remote_project_id || !gateway.hasProject(task.remote_project_id))) {
+        return res.status(409).json({ error: "任务对应的远端项目当前离线；不会回退到 Tenant。" });
+      }
+      const started = store.startTask(id, session.user_id, readVersion(req.body?.version), options.selectionForTask(task, session.user_id));
+      options.onJobQueued();
+      return res.status(202).json({
+        task: serializeTaskWithState(store, started.task, session.user_id),
+        job: { id: started.job.id, status: started.job.status, conversationId: started.conversationId },
+      });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -164,7 +191,7 @@ export function installTaskboardApiRoutes(
     if (!session) return;
     try {
       const task = store.archiveTask(String(req.params.id), session.user_id, readVersion(req.body?.version));
-      return res.json({ task: { ...serializeTask(task), allowedTransitions: [] } });
+      return res.json({ task: { ...serializeTask(task), executionStatus: null, jobId: null, allowedTransitions: [] } });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -179,7 +206,7 @@ export function installTaskboardApiRoutes(
         String(req.params.id), session.user_id, readVersion(req.body?.version), req.body.status,
         readOptionalText(req.body?.reason, "状态说明", 2_000),
       );
-      return res.json({ task: { ...serializeTask(task), allowedTransitions: transitionTargets(task.status) } });
+      return res.json({ task: serializeTaskWithState(store, task, session.user_id) });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -194,7 +221,7 @@ export function installTaskboardApiRoutes(
       }
       const dependencyIds = req.body.dependencyIds.map((value: unknown) => readId(value, "依赖任务"));
       const task = store.replaceDependencies(String(req.params.id), session.user_id, readVersion(req.body?.version), dependencyIds);
-      return res.json({ task: { ...serializeTask(task), allowedTransitions: transitionTargets(task.status) } });
+      return res.json({ task: serializeTaskWithState(store, task, session.user_id) });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -318,6 +345,16 @@ function serializeTask(task: ReturnType<TaskboardStore["createTask"]>) {
     archivedAt: task.archived_at,
     createdAt: task.created_at,
     updatedAt: task.updated_at,
+  };
+}
+
+function serializeTaskWithState(store: TaskboardStore, task: TaskboardTaskRow, userId: string) {
+  const execution = store.getTaskExecution(task.id, userId);
+  return {
+    ...serializeTask(task),
+    executionStatus: execution?.status ?? null,
+    jobId: execution?.jobId ?? null,
+    allowedTransitions: transitionTargets(task.status),
   };
 }
 

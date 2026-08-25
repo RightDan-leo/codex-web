@@ -328,6 +328,7 @@ export class AppDatabase {
         acceptance_criteria TEXT NOT NULL DEFAULT '',
         position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
         conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        active_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
         executor_kind TEXT NOT NULL CHECK(executor_kind IN ('tenant','remote')),
         remote_project_id TEXT,
         version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
@@ -381,6 +382,8 @@ export class AppDatabase {
     const fileColumns = this.columnNames("files");
     if (!fileColumns.has("pending_prompt_id")) this.sqlite.exec("ALTER TABLE files ADD COLUMN pending_prompt_id TEXT REFERENCES pending_prompts(id) ON DELETE CASCADE");
     if (!fileColumns.has("composer_draft_id")) this.sqlite.exec("ALTER TABLE files ADD COLUMN composer_draft_id TEXT REFERENCES composer_drafts(conversation_id) ON DELETE CASCADE");
+    const taskboardTaskColumns = this.columnNames("taskboard_tasks");
+    if (!taskboardTaskColumns.has("active_job_id")) this.sqlite.exec("ALTER TABLE taskboard_tasks ADD COLUMN active_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL");
     this.sqlite.prepare("UPDATE jobs SET queue_seq=rowid WHERE queue_seq IS NULL").run();
 
     const now = new Date().toISOString();
@@ -422,6 +425,7 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS taskboard_projects_user_idx ON taskboard_projects(user_id,archived_at,updated_at);
       CREATE INDEX IF NOT EXISTS taskboard_tasks_project_idx ON taskboard_tasks(project_id,archived_at,status,position);
       CREATE UNIQUE INDEX IF NOT EXISTS taskboard_tasks_conversation_idx ON taskboard_tasks(conversation_id) WHERE conversation_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS taskboard_tasks_active_job_idx ON taskboard_tasks(active_job_id) WHERE active_job_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS taskboard_dependencies_reverse_idx ON taskboard_task_dependencies(depends_on_task_id,task_id);
       CREATE INDEX IF NOT EXISTS taskboard_events_task_idx ON taskboard_events(task_id,id);
     `);

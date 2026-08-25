@@ -58,7 +58,7 @@ test("taskboard persists projects, hierarchy and immutable executor snapshots", 
 });
 
 test("dependencies are same-project, acyclic and block work until completed", (t) => {
-  const { store } = setup(t);
+  const { db, store } = setup(t);
   const project = store.createProject(LEGACY_USER_ID, { name: "Board", description: "", executor: { kind: "tenant" } });
   const foundation = createTask(store, project.id, "Foundation");
   const feature = createTask(store, project.id, "Feature");
@@ -66,18 +66,21 @@ test("dependencies are same-project, acyclic and block work until completed", (t
   const featureWithDependency = store.replaceDependencies(feature.id, LEGACY_USER_ID, feature.version, [foundation.id]);
   const featureReady = store.transitionTask(feature.id, LEGACY_USER_ID, featureWithDependency.version, "ready");
   assert.throws(
-    () => store.transitionTask(feature.id, LEGACY_USER_ID, featureReady.version, "running"),
+    () => store.startTask(feature.id, LEGACY_USER_ID, featureReady.version, { model: "gpt-test", reasoningEffort: "high" }),
     (error: unknown) => error instanceof TaskboardConflictError && /前置任务/.test(error.message),
   );
 
   let current = store.transitionTask(foundation.id, LEGACY_USER_ID, foundation.version, "ready");
-  current = store.transitionTask(foundation.id, LEGACY_USER_ID, current.version, "running");
-  current = store.transitionTask(foundation.id, LEGACY_USER_ID, current.version, "review");
+  const foundationRun = store.startTask(foundation.id, LEGACY_USER_ID, current.version, { model: "gpt-test", reasoningEffort: "high" });
+  db.finishJob(foundationRun.job.id, foundationRun.conversationId, "completed");
+  current = store.settleTaskForJob(foundationRun.job.id)!;
+  assert.equal(current.status, "review");
   current = store.transitionTask(foundation.id, LEGACY_USER_ID, current.version, "done");
   assert.equal(current.status, "done");
 
-  const running = store.transitionTask(feature.id, LEGACY_USER_ID, featureReady.version, "running");
-  assert.equal(running.status, "running");
+  const running = store.startTask(feature.id, LEGACY_USER_ID, featureReady.version, { model: "gpt-test", reasoningEffort: "high" });
+  assert.equal(running.task.status, "running");
+  assert.equal(running.job.status, "queued");
 });
 
 test("dependency and parent cycles are rejected", (t) => {
@@ -174,4 +177,58 @@ test("projects with backlog tasks cannot be archived", (t) => {
     () => store.archiveProject(project.id, LEGACY_USER_ID, current.version),
     (error: unknown) => error instanceof TaskboardConflictError && /待处理任务/.test(error.message),
   );
+});
+
+test("running requires an atomic queued Codex job and terminal jobs reconcile the board", (t) => {
+  const { db, store } = setup(t);
+  const project = store.createProject(LEGACY_USER_ID, { name: "Execution", description: "", executor: { kind: "remote", projectId: "logical-project" } });
+  const task = createTask(store, project.id, "Execute for real");
+  const ready = store.transitionTask(task.id, LEGACY_USER_ID, task.version, "ready");
+  assert.throws(
+    () => store.transitionTask(task.id, LEGACY_USER_ID, ready.version, "running"),
+    (error: unknown) => error instanceof TaskboardConflictError && /真实启动/.test(error.message),
+  );
+
+  const started = store.startTask(task.id, LEGACY_USER_ID, ready.version, { model: "gpt-test", reasoningEffort: "high" });
+  assert.equal(started.task.status, "running");
+  assert.equal(started.task.conversation_id, started.conversationId);
+  assert.equal(store.getTaskExecution(task.id, LEGACY_USER_ID)?.status, "queued");
+  const executor = db.sqlite.prepare("SELECT kind,project_id FROM conversation_executors WHERE conversation_id=?").get(started.conversationId) as { kind: string; project_id: string };
+  assert.equal(executor.kind, "remote");
+  assert.equal(executor.project_id, "logical-project");
+  const message = db.getMessage(started.job.message_id!);
+  assert.match(message?.content ?? "", /Execute for real/);
+  assert.doesNotMatch(message?.content ?? "", /cwd|CODEX_HOME|REMOTE_WORKER_TOKEN/);
+
+  db.finishJob(started.job.id, started.conversationId, "completed");
+  const review = store.settleTaskForJob(started.job.id)!;
+  assert.equal(review.status, "review");
+});
+
+test("failed Codex work becomes blocked instead of completed", (t) => {
+  const { db, store } = setup(t);
+  const project = store.createProject(LEGACY_USER_ID, { name: "Failure", description: "", executor: { kind: "tenant" } });
+  const task = createTask(store, project.id, "Failure task");
+  const ready = store.transitionTask(task.id, LEGACY_USER_ID, task.version, "ready");
+  const started = store.startTask(task.id, LEGACY_USER_ID, ready.version, { model: "gpt-test", reasoningEffort: "high" });
+  db.finishJob(started.job.id, started.conversationId, "failed", "controlled test failure");
+  assert.equal(store.settleTaskForJob(started.job.id)?.status, "blocked");
+});
+
+test("a late result from an older job cannot settle a restarted task", (t) => {
+  const { db, store } = setup(t);
+  const project = store.createProject(LEGACY_USER_ID, { name: "Restart", description: "", executor: { kind: "tenant" } });
+  const task = createTask(store, project.id, "Restart safely");
+  let current = store.transitionTask(task.id, LEGACY_USER_ID, task.version, "ready");
+  const first = store.startTask(task.id, LEGACY_USER_ID, current.version, { model: "gpt-test", reasoningEffort: "high" });
+  db.finishJob(first.job.id, first.conversationId, "failed", "first attempt failed");
+  current = store.settleTaskForJob(first.job.id)!;
+  current = store.transitionTask(task.id, LEGACY_USER_ID, current.version, "ready");
+  const second = store.startTask(task.id, LEGACY_USER_ID, current.version, { model: "gpt-test", reasoningEffort: "high" });
+
+  assert.equal(store.settleTaskForJob(first.job.id), null);
+  assert.equal(store.getTask(task.id, LEGACY_USER_ID)?.status, "running");
+  assert.equal(store.getTask(task.id, LEGACY_USER_ID)?.active_job_id, second.job.id);
+  db.finishJob(second.job.id, second.conversationId, "completed");
+  assert.equal(store.settleTaskForJob(second.job.id)?.status, "review");
 });

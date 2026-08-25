@@ -42,11 +42,13 @@ cancelled 已取消
 ```text
 backlog -> ready | cancelled
 ready -> backlog | running | blocked | cancelled
-running -> review | blocked | cancelled
+running -> review | blocked
 review -> ready | done | cancelled
 blocked -> ready | cancelled
 done -> archived
 ```
+
+运行中的任务必须先停止对应工作会话，随后由执行结果进入 `blocked`，再由 Owner 决定重试或取消。不能只移动卡片而让实际 Codex 继续运行。
 
 所有转换必须写入不可变事件记录。自动化只能执行策略明确允许的转换，不能通过直接更新数据库绕过状态机。
 
@@ -133,11 +135,14 @@ Owner 置顶、暂停和手工排序始终优先。每次自动调度保存完�
 - `GET/PATCH/DELETE /api/taskboard/projects/:id`
 - `GET/POST /api/taskboard/projects/:id/tasks`
 - `GET/PATCH /api/taskboard/tasks/:id`
+- `POST /api/taskboard/tasks/:id/start`
 - `POST /api/taskboard/tasks/:id/transition`
 - `PUT /api/taskboard/tasks/:id/dependencies`
 - `GET /api/taskboard/tasks/:id/events`
 
 所有写请求必须包含 CSRF Token 和乐观版本号。
+
+`start` 是进入 `running` 的唯一入口：它在同一个数据库事务中创建或复用锁定的工作会话、写入用户任务消息、创建持久 Job、绑定当前 `jobId` 并更新任务状态。普通 `transition` API 不允许伪造 `running`。Codex 成功后任务自动进入 `review`；失败、取消或中断后进入 `blocked`。
 
 界面原生集成到 Codex Web，使用主应用的 React Root、主题和响应式布局，不使用 CDP 注入或第二套认证。移动端优先提供按列切换，桌面端提供横向看板。
 
