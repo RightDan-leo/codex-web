@@ -9,12 +9,12 @@ Codex Web 是一个非官方、自托管的 OpenAI Codex CLI 网页工作台。�
 环境要求：Docker Engine、Docker Compose v2，以及可登录 Codex CLI 的账号。
 
 ```bash
-cp .env.example .env
+cp .env.example app.env
 npm ci
 npm run hash-password -- '请设置一个至少十二位的独立密码'
 ```
 
-把生成的哈希填入 `.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。然后执行：
+把生成的哈希填入 `app.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。Docker Compose 会自动解析名为 `.env` 的文件，bcrypt 哈希中的 `$` 可能因此被当成变量并出现在警告日志里；应用密钥单独放在 `app.env` 可以避免这种插值。`.env` 只用于可选的 Compose 设置，例如端口、CPU、内存上限和时区。然后执行：
 
 ```bash
 docker compose up -d --build

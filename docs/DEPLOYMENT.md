@@ -12,7 +12,7 @@ docker compose logs --tail=200 app
 curl --fail http://127.0.0.1:37821/codex-web/api/health
 ```
 
-Back up all three named volumes before upgrades. Keep `.env` outside source control.
+Back up all three named volumes before upgrades. Keep `app.env` outside source control. Reserve `.env` for non-secret Docker Compose interpolation settings only.
 
 Docker grants the application up to 30 minutes after `SIGTERM` to drain active Codex work. New dispatch stops immediately, queued jobs stay persisted, and the container exits once active executions finish. Avoid overriding `stop_grace_period` with a shorter value unless you accept interrupted jobs.
 
@@ -42,7 +42,7 @@ bash deploy/tailscale/configure-serve.sh
 tailscale serve status
 ```
 
-The command prints an HTTPS hostname similar to `https://machine-name.example.ts.net`. Set the application URL, including the existing base path, in `.env`:
+The command prints an HTTPS hostname similar to `https://machine-name.example.ts.net`. Set the application URL, including the existing base path, in `app.env`:
 
 ```dotenv
 PUBLIC_BASE_URL=https://machine-name.example.ts.net/codex-web
@@ -74,7 +74,7 @@ Changing the public URL does not change the SQLite database, named volumes, exec
 
 The Compose defaults limit the application to 3 GiB and 1.8 CPU, leaving headroom on a 2 vCPU / 4 GiB host for the operating system, Docker, and Tailscale. Override `CODEX_WEB_MEMORY_LIMIT` and `CODEX_WEB_CPU_LIMIT` in `.env` on larger hosts. These are ceilings, not reservations.
 
-For optional voice transcription, keep `DASHSCOPE_API_KEY` only in `.env`. The default context budget is 500 approximate tokens, two images, and 2 MiB per image. Adjust `TRANSCRIPTION_CONTEXT_TOKEN_BUDGET`, `TRANSCRIPTION_CONTEXT_MAX_IMAGES`, and `TRANSCRIPTION_CONTEXT_MAX_IMAGE_BYTES` only after considering request cost and data exposure.
+For optional voice transcription, keep `DASHSCOPE_API_KEY` only in `app.env`. The default context budget is 500 approximate tokens, two images, and 2 MiB per image. Adjust `TRANSCRIPTION_CONTEXT_TOKEN_BUDGET`, `TRANSCRIPTION_CONTEXT_MAX_IMAGES`, and `TRANSCRIPTION_CONTEXT_MAX_IMAGE_BYTES` only after considering request cost and data exposure.
 
 ## Updating
 

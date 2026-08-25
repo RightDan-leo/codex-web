@@ -20,7 +20,9 @@ services:
     ports:
       - "127.0.0.1:${CODEX_WEB_PORT:-37821}:37821"
     volumes:
-      - ./.env:/app/.env:ro
+      # Keep application secrets out of Compose's automatic .env interpolation.
+      # Copy .env.example to app.env for container deployments.
+      - ./app.env:/app/.env:ro
       - app-data:/app/data
       - tenant-data:/app/tenants
       - codex-runtime:/opt/codex-runtime

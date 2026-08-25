@@ -158,7 +158,7 @@ For the public build, the web process has no Docker socket, host filesystem moun
 1. Copy the configuration template:
 
    ```bash
-   cp .env.example .env
+   cp .env.example app.env
    ```
 
 2. Install development dependencies and generate a password hash:
@@ -168,7 +168,9 @@ For the public build, the web process has no Docker socket, host filesystem moun
    npm run hash-password -- 'choose-a-long-unique-password'
    ```
 
-3. Put the generated hash in `APP_PASSWORD_HASH`, set a random `SESSION_SECRET` of at least 32 characters, and adjust `APP_USERNAME` and `APP_DISPLAY_NAME` in `.env`.
+3. Put the generated hash in `APP_PASSWORD_HASH`, set a random `SESSION_SECRET` of at least 32 characters, and adjust `APP_USERNAME` and `APP_DISPLAY_NAME` in `app.env`.
+
+   Docker Compose automatically parses a file named `.env`, including `$` characters in bcrypt hashes. Keeping application secrets in `app.env` prevents those values from being interpolated or echoed as Compose warnings. Use `.env` only for optional Compose settings such as `CODEX_WEB_PORT`, `CODEX_WEB_MEMORY_LIMIT`, `CODEX_WEB_CPU_LIMIT`, and `TZ`.
 
 4. Build and start the service:
 
@@ -193,7 +195,7 @@ For private mobile access, start with Tailscale Serve so HTTPS is available only
 
 ## Optional voice transcription
 
-Set `DASHSCOPE_API_KEY` and an HTTPS `PUBLIC_BASE_URL` in `.env` to enable the microphone button. The default model is `qwen3.5-omni-plus`; you can override it with `DASHSCOPE_ASR_MODEL`. Microphone access requires a secure browser context.
+Set `DASHSCOPE_API_KEY` and an HTTPS `PUBLIC_BASE_URL` in `app.env` to enable the microphone button. The default model is `qwen3.5-omni-plus`; you can override it with `DASHSCOPE_ASR_MODEL`. Microphone access requires a secure browser context.
 
 Audio is uploaded to your server first and then sent to the DashScope endpoint configured by `DASHSCOPE_BASE_URL`. Leave the key empty to disable the feature completely.
 
