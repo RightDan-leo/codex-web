@@ -109,6 +109,7 @@ async function main(): Promise<void> {
       codexVersion: codexVersion(config.codexExecutablePath),
       supportsSteering: true,
       supportsInterrupt: true,
+      supportsAttachments: true,
     },
     projects: config.projects.map((project) => ({ id: project.id, name: project.name })),
   };
