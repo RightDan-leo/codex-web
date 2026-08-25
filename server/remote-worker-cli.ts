@@ -24,7 +24,7 @@ function endpoint(serverUrl: string, path: string): string {
   return `${serverUrl}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-function authHeaders(token: string, json = false): HeadersInit {
+function authHeaders(token: string, json = false): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
@@ -137,13 +137,14 @@ async function main(): Promise<void> {
         if (!message) continue;
         const task = runtime.handle(message, (workerMessage) => {
           const send = postMessage(config.serverUrl, token, sessionId, workerMessage)
-            .catch((error) => console.error(`Unable to publish remote worker event: ${error instanceof Error ? error.message : String(error)}`))
-            .finally(() => outbound.delete(send));
+            .catch((error) => console.error(`Unable to publish remote worker event: ${error instanceof Error ? error.message : String(error)}`));
           outbound.add(send);
+          void send.finally(() => outbound.delete(send));
         }).catch((error) => {
           console.error(`Unable to handle remote worker message: ${error instanceof Error ? error.message : String(error)}`);
-        }).finally(() => handlers.delete(task));
+        });
         handlers.add(task);
+        void task.finally(() => handlers.delete(task));
       }
     } catch (error) {
       activePoll = undefined;
