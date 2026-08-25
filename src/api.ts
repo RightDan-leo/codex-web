@@ -32,6 +32,15 @@ export type ComposerDraft = {
   updated_at: string;
 };
 export type Job = { id: string; status: string; conversation_id: string; queuePosition?: number };
+export type ExecutorTarget =
+  | { kind: "tenant"; updatedAt?: string }
+  | { kind: "remote"; projectId: string; updatedAt?: string };
+export type RemoteWorkerStatus = {
+  workerId: string;
+  displayName: string;
+  connectedAt: number;
+  projects: Array<{ id: string; name: string }>;
+};
 // The online Codex catalog is authoritative. Keep this open so a newer CLI can
 // expose a new reasoning level without requiring a front-end release first.
 export type ReasoningEffort = string;
@@ -87,6 +96,7 @@ export function setCsrf(value?: string) { csrfToken = value ?? ""; }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase()) && csrfToken) headers.set("X-CSRF-Token", csrfToken);
   const response = await fetch(`${BASE_PATH}/api${path}`, { ...init, headers, credentials: "same-origin" });
@@ -102,6 +112,11 @@ export const api = {
   logout: () => request<{ ok: true }>("/auth/logout", { method: "POST" }),
   conversations: () => request<{ conversations: Conversation[] }>("/conversations"),
   archivedConversations: (query = "") => request<{ conversations: Conversation[] }>(`/conversations/archived${query ? `?query=${encodeURIComponent(query)}` : ""}`),
+  remoteWorkers: () => request<{ workers: RemoteWorkerStatus[] }>("/remote-workers"),
+  conversationExecutor: (id: string) => request<{ executor: ExecutorTarget; online: boolean }>(`/conversations/${id}/executor`),
+  updateConversationExecutor: (id: string, executor: ExecutorTarget) => request<{ executor: ExecutorTarget; online: boolean }>(
+    `/conversations/${id}/executor`, { method: "PUT", body: JSON.stringify(executor) },
+  ),
   agentOptions: () => request<AgentOptions>("/agent-options"),
   updateAgentSelection: (selection: AgentSelection, conversationId?: string) => request<{ selection: AgentSelection }>(
     conversationId ? `/conversations/${conversationId}/agent-selection` : "/agent-selection",
