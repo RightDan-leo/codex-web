@@ -4,13 +4,18 @@ import pino from "pino";
 import { createApp } from "./app.js";
 import { assertProductionConfig } from "./config.js";
 
-const { app, db, config, runner, beginShutdown } = createApp();
+const { app, db, config, runner, remoteWorkerService, beginShutdown } = createApp();
 assertProductionConfig(config);
 fs.mkdirSync(path.join(config.dataRoot, "logs"), { recursive: true });
 const logger = pino(pino.destination({ dest: path.join(config.dataRoot, "logs", "app.log"), sync: false }));
 
 const server = app.listen(config.port, config.host, () => {
-  logger.info({ host: config.host, port: config.port, basePath: config.basePath }, "Codex Web started");
+  logger.info({
+    host: config.host,
+    port: config.port,
+    basePath: config.basePath,
+    remoteWorkerEnabled: Boolean(remoteWorkerService),
+  }, "Codex Web started");
 });
 
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 29 * 60_000;
@@ -30,6 +35,9 @@ async function shutdown(signal: string): Promise<void> {
     logger.error({ remainingJobs, activeExecutions: runner.activeJobCount }, "Shutdown drain timed out");
     process.exit(1);
   }
+  // Keep the worker transport alive until all local and remote jobs drain.
+  runner.close();
+  remoteWorkerService?.close();
   logger.info("Running jobs drained; closing network services");
   server.close(() => {
     db.close();

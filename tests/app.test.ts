@@ -192,7 +192,7 @@ test("selected message text can be quoted into a focused Agent question", () => 
 test("pending queue stays translucent and vertically compact in both themes", () => {
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
   const styles = fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8");
-  assert.match(appSource, /className=\{`workspace \$\{currentDetail\?\.pendingPrompts\.length \? "has-pending-queue" : ""\}`\}/);
+  assert.match(appSource, /className=\{`workspace \$\{workspaceView === "chat" && currentDetail\?\.pendingPrompts\.length \? "has-pending-queue" : ""\}`\}/);
   assert.match(styles, /\.pending-queue \{[^}]*background: rgba\(255, 255, 255, \.72\);[^}]*backdrop-filter: blur\(10px\)/);
   assert.match(styles, /\.pending-queue-heading \{[^}]*min-height: 26px;[^}]*padding: 4px 9px 3px;/);
   assert.match(styles, /\.pending-queue-list \{[^}]*max-height: 174px;[^}]*overflow-y: auto;[^}]*overscroll-behavior-y: contain;[^}]*touch-action: pan-y;/);
@@ -418,6 +418,7 @@ test("the owner tenant has a dedicated Unix identity and workers reject cross-te
   assert.throws(() => validateTenantWorkerRequest({ ...request, imagePaths: [path.join(tenantRoot, "..", "secret.png")] }, owner.userId, tenantRoot), /escapes workspace/);
   const executionSource = fs.readFileSync(path.join(process.cwd(), "server", "tenant-worker-execution.ts"), "utf8");
   const composeSource = fs.readFileSync(path.join(process.cwd(), "compose.yaml"), "utf8");
+  const permissionSource = fs.readFileSync(path.join(process.cwd(), "scripts", "migrate-tenant-permissions.sh"), "utf8");
   assert.match(executionSource, /executablePath: process\.env\.CODEX_RUNTIME_PATH/);
   const appServerSource = fs.readFileSync(path.join(process.cwd(), "server", "app-server-turn.ts"), "utf8");
   assert.match(appServerSource, /"turn\/steer"/);
@@ -425,6 +426,11 @@ test("the owner tenant has a dedicated Unix identity and workers reject cross-te
   assert.match(appServerSource, /this\.request\("thread\/resume", \{ threadId: this\.options\.threadId, \.\.\.common, excludeTurns: true \}\)/);
   assert.match(appServerSource, /this\.request\("thread\/start", common\)/);
   assert.match(composeSource, /codex-runtime:\/opt\/codex-runtime/);
+  assert.match(composeSource, /\.\/app\.env:\/app\/\.env:ro/);
+  assert.match(composeSource, /- CHOWN/);
+  assert.match(composeSource, /- FOWNER/);
+  assert.match(composeSource, /- DAC_READ_SEARCH/);
+  assert.ok(permissionSource.indexOf('mkdir -p "$data_root" "$tenant_root" "$tenant"') < permissionSource.indexOf('chown "$web_uid:$web_uid" "$tenant_root"'));
 });
 
 test("conversation workspaces stay concise while tenants receive the managed local spreadsheet skill", (context) => {
@@ -539,6 +545,11 @@ test("production binding permits public bind only when explicitly containerized"
   assert.doesNotThrow(() => assertProductionConfig({ ...base, host: "127.0.0.1", containerized: false }));
   assert.doesNotThrow(() => assertProductionConfig({ ...base, host: "0.0.0.0", containerized: true }));
   assert.throws(() => assertProductionConfig({ ...base, host: "0.0.0.0", containerized: false }), /hardened container/);
+  assert.doesNotThrow(() => assertProductionConfig({ ...base, publicBaseUrl: "https://node.example.ts.net/codex-web" }));
+  assert.doesNotThrow(() => assertProductionConfig({ ...base, publicBaseUrl: "http://localhost:37821/codex-web" }));
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "http://public.example/codex-web" }), /must use HTTPS/);
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "https://public.example/wrong-path" }), /path must match BASE_PATH/);
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "https://user:secret@public.example/codex-web" }), /without credentials/);
 });
 
 test("agent options use the live image-capable catalog and default to Sol with extra-high reasoning", (context) => {

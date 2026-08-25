@@ -35,6 +35,7 @@ export type AppServerTurnExecution = {
   result: Promise<string>;
   steer(prompt: string, imagePaths?: string[]): Promise<string>;
   interrupt(): void;
+  terminate?(): void;
 };
 
 type PendingRequest = {
@@ -107,6 +108,11 @@ class AppServerTurnClient {
     if (threadId && turnId && this.child.stdin.writable) {
       void this.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
     }
+  }
+
+  terminate(): void {
+    if (this.terminal || this.child.killed) return;
+    this.child.kill("SIGTERM");
   }
 
   private async start(): Promise<void> {
@@ -251,6 +257,7 @@ export function startAppServerTurn(options: AppServerTurnOptions, callbacks: App
     result: client.run(),
     steer: (prompt, imagePaths) => client.steer(prompt, imagePaths),
     interrupt: () => client.interrupt(),
+    terminate: () => client.terminate(),
   };
 }
 

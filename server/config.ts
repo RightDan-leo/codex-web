@@ -102,4 +102,23 @@ export function assertProductionConfig(config: AppConfig): void {
   if (!loopback && !containerBind) {
     throw new Error("The service must bind to loopback, or 0.0.0.0 only inside the hardened container");
   }
+  if (config.publicBaseUrl) {
+    let publicUrl: URL;
+    try {
+      publicUrl = new URL(config.publicBaseUrl);
+    } catch {
+      throw new Error("PUBLIC_BASE_URL must be a valid absolute URL");
+    }
+    if (!["http:", "https:"].includes(publicUrl.protocol) || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash) {
+      throw new Error("PUBLIC_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment");
+    }
+    const publicPath = normalizeBasePath(publicUrl.pathname);
+    if (publicPath !== config.basePath) {
+      throw new Error(`PUBLIC_BASE_URL path must match BASE_PATH (${config.basePath || "/"})`);
+    }
+    const localHost = ["localhost", "127.0.0.1", "::1"].includes(publicUrl.hostname);
+    if (publicUrl.protocol !== "https:" && !localHost) {
+      throw new Error("PUBLIC_BASE_URL must use HTTPS for non-local access");
+    }
+  }
 }

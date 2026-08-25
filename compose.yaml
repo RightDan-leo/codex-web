@@ -20,7 +20,9 @@ services:
     ports:
       - "127.0.0.1:${CODEX_WEB_PORT:-37821}:37821"
     volumes:
-      - ./.env:/app/.env:ro
+      # Keep application secrets out of Compose's automatic .env interpolation.
+      # Copy .env.example to app.env for container deployments.
+      - ./app.env:/app/.env:ro
       - app-data:/app/data
       - tenant-data:/app/tenants
       - codex-runtime:/opt/codex-runtime
@@ -30,6 +32,11 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      # Startup repairs ownership and ACLs on persistent named volumes before
+      # the supervisor drops each worker to its fixed tenant identity.
+      - CHOWN
+      - FOWNER
+      - DAC_READ_SEARCH
       - SETUID
       - SETGID
       - KILL
@@ -38,8 +45,10 @@ services:
       - seccomp=unconfined
       - apparmor=unconfined
     pids_limit: 1024
-    mem_limit: 8g
-    cpus: 3.5
+    # Defaults fit a 2 vCPU / 4 GiB host while leaving memory for Docker,
+    # Tailscale, and the operating system. Larger hosts can override both.
+    mem_limit: ${CODEX_WEB_MEMORY_LIMIT:-3g}
+    cpus: ${CODEX_WEB_CPU_LIMIT:-1.8}
     # Let SIGTERM drain in-flight Codex jobs before Docker sends SIGKILL.
     stop_grace_period: 30m
     healthcheck:

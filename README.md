@@ -72,13 +72,13 @@ flowchart TB
     subgraph extension["PP Agent administrator extension"]
         router["Project + executor router"]
         hostBridge["Trusted local host bridge"]
-        gateway["Remote Worker WSS gateway"]
+        gateway["Remote Worker polling gateway"]
     end
 
     admin -. "project mode" .-> router
     router --> hostBridge --> hostCodex["Server-side Codex"]
     router --> gateway
-    remoteWorker["Remote Worker"] -. "opens authenticated WSS" .-> gateway
+    remoteWorker["Remote Worker"] -. "authenticated outbound polling" .-> gateway
     gateway -->|"structured requests"| remoteWorker
     remoteWorker --> appServer["Local codex app-server"]
     appServer <--> remoteState[("Remote project<br/>and user Codex Home")]
@@ -91,7 +91,7 @@ The important boundary is the executor, not the browser account alone. A restric
 
 ### Remote computer execution
 
-A Remote Worker does not expose an inbound shell, RDP endpoint, or generic tunnel. It initiates an application-level WSS connection to the server, advertises its runtime capabilities, and executes only requests addressed to a registered project. Codex runs under the interactive user on that computer, with the real project directory as `cwd` and that user's normal Codex Home, so web-started and desktop-started threads share the same local Codex history.
+A Remote Worker does not expose an inbound shell, RDP endpoint, or generic tunnel. The current MVP initiates authenticated outbound long polling to the server, advertises its runtime capabilities, and executes only requests addressed to a registered project. Codex runs under the interactive user on that computer, with the real project directory as `cwd` and that user's normal Codex Home. The server stores the returned Codex thread ID so later turns in the same web conversation can resume it.
 
 ```mermaid
 sequenceDiagram
@@ -103,7 +103,7 @@ sequenceDiagram
     participant C as Local codex app-server
     participant P as Remote project + Codex Home
 
-    W->>G: Establish outbound authenticated WSS
+    W->>G: Register, then open authenticated long polls
     A->>API: Open project and submit a task
     API->>API: Persist prompt and queue state
     API->>G: Dispatch to selected executor
@@ -114,16 +114,9 @@ sequenceDiagram
     W-->>G: Forward structured events
     G-->>API: Persist events, messages, and thread ID
     API-->>A: Live journal over SSE
-    A->>API: Refresh tasks created by the desktop app
-    API->>G: Request thread/list and thread/read
-    G->>W: Read matching cwd threads
-    W->>C: List and read matching threads
-    C-->>W: Return thread, turn, and item data
-    W-->>G: Return paged thread updates
-    G-->>API: Merge idempotently, newest first
 ```
 
-Remote synchronization is deliberately explicit rather than pretending to be a distributed filesystem. Thread, turn, and item identifiers make imports idempotent; offline machines keep their project history visible, while new work waits until the executor is available. An archived project is hidden without deleting its tasks and stops receiving explicit synchronization until the same executor and folder are added again.
+The MVP does not import arbitrary desktop-created threads or synchronize a filesystem. Remote-generated files remain on that computer; only progress, the thread ID, and the final text response return to Codex Web. An offline selected project fails closed instead of running the task in a tenant workspace.
 
 ### Durable task lifecycle
 
@@ -165,7 +158,7 @@ For the public build, the web process has no Docker socket, host filesystem moun
 1. Copy the configuration template:
 
    ```bash
-   cp .env.example .env
+   cp .env.example app.env
    ```
 
 2. Install development dependencies and generate a password hash:
@@ -175,7 +168,11 @@ For the public build, the web process has no Docker socket, host filesystem moun
    npm run hash-password -- 'choose-a-long-unique-password'
    ```
 
-3. Put the generated hash in `APP_PASSWORD_HASH`, set a random `SESSION_SECRET` of at least 32 characters, and adjust `APP_USERNAME` and `APP_DISPLAY_NAME` in `.env`.
+3. Put the generated hash in `APP_PASSWORD_HASH`, set a random `SESSION_SECRET` of at least 32 characters, and adjust `APP_USERNAME` and `APP_DISPLAY_NAME` in `app.env`.
+
+   Docker Compose automatically parses a file named `.env`, including `$` characters in bcrypt hashes. Keeping application secrets in `app.env` prevents those values from being interpolated or echoed as Compose warnings. Use `.env` only for optional Compose settings such as `CODEX_WEB_PORT`, `CODEX_WEB_MEMORY_LIMIT`, `CODEX_WEB_CPU_LIMIT`, and `TZ`.
+
+   On a Linux production host, keep the file readable only by root and the fixed web-process group: `sudo chown root:10001 app.env && sudo chmod 0640 app.env`. Docker Desktop users can keep the platform-managed file permissions.
 
 4. Build and start the service:
 
@@ -196,9 +193,11 @@ For the public build, the web process has no Docker socket, host filesystem moun
 
 State is stored in Docker named volumes. Closing the browser does not remove queued work, attachments, unsent composer drafts, or archived conversations.
 
+For private mobile access, start with Tailscale Serve so HTTPS is available only inside the tailnet while the container port remains loopback-only. A later move to a public domain changes only the reverse proxy and `PUBLIC_BASE_URL`; volumes, sessions, and Remote Worker project mappings remain intact. See the [deployment guide](docs/DEPLOYMENT.md).
+
 ## Optional voice transcription
 
-Set `DASHSCOPE_API_KEY` and an HTTPS `PUBLIC_BASE_URL` in `.env` to enable the microphone button. The default model is `qwen3.5-omni-plus`; you can override it with `DASHSCOPE_ASR_MODEL`. Microphone access requires a secure browser context.
+Set `DASHSCOPE_API_KEY` and an HTTPS `PUBLIC_BASE_URL` in `app.env` to enable the microphone button. The default model is `qwen3.5-omni-plus`; you can override it with `DASHSCOPE_ASR_MODEL`. Microphone access requires a secure browser context.
 
 Audio is uploaded to your server first and then sent to the DashScope endpoint configured by `DASHSCOPE_BASE_URL`. Leave the key empty to disable the feature completely.
 

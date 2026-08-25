@@ -9,12 +9,12 @@ Codex Web 是一个非官方、自托管的 OpenAI Codex CLI 网页工作台。�
 环境要求：Docker Engine、Docker Compose v2，以及可登录 Codex CLI 的账号。
 
 ```bash
-cp .env.example .env
+cp .env.example app.env
 npm ci
 npm run hash-password -- '请设置一个至少十二位的独立密码'
 ```
 
-把生成的哈希填入 `.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。然后执行：
+把生成的哈希填入 `app.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。Docker Compose 会自动解析名为 `.env` 的文件，bcrypt 哈希中的 `$` 可能因此被当成变量并出现在警告日志里；应用密钥单独放在 `app.env` 可以避免这种插值。`.env` 只用于可选的 Compose 设置，例如端口、CPU、内存上限和时区。在 Linux 生产主机上执行 `sudo chown root:10001 app.env && sudo chmod 0640 app.env`，让它仅对 root 和容器内固定 Web 进程组可读；Docker Desktop 可以继续使用平台管理的文件权限。然后执行：
 
 ```bash
 docker compose up -d --build
@@ -25,6 +25,8 @@ docker compose exec --user 11001:11001 \
 ```
 
 打开 [http://localhost:37821/codex-web/](http://localhost:37821/codex-web/) 即可使用。队列、附件、会话、归档记录、Codex 线程，以及输入框中尚未发送的正文、引用和附件都保存在服务器端；切换会话、关闭浏览器或换设备后仍可继续编辑。
+
+需要从手机安全访问时，推荐先用 Tailscale Serve 提供仅 tailnet 内可见的 HTTPS 地址；容器端口仍只监听服务器回环地址。以后迁移到自己的公网域名只需更换反向代理和 `PUBLIC_BASE_URL`，数据卷、会话和 Remote Worker 项目映射无需重建。具体步骤见[部署说明](docs/DEPLOYMENT.md)。
 
 运行中的工作记录不再形成独立的纵向滚动区，而是按照现有记录上限随页面自然展开。排队与运行状态使用不同图标；任务操作收进稳定的菜单。用户终止任务后，关键执行过程会保留为历史消息；服务意外重启也会明确标记未完成任务，避免把中断误认为完成或自动重复执行。容器正常停止时会等待在途任务结束，已排队任务继续保存在服务器。
 
@@ -68,13 +70,13 @@ flowchart TB
     subgraph extension["PP Agent 管理员扩展层"]
         router["项目与执行器路由"]
         hostBridge["可信本机宿主桥"]
-        gateway["远端 Worker WSS 网关"]
+        gateway["远端 Worker 长轮询网关"]
     end
 
     admin -. "项目模式" .-> router
     router --> hostBridge --> hostCodex["服务器本机 Codex"]
     router --> gateway
-    remoteWorker["远端 Worker"] -. "主动建立认证 WSS" .-> gateway
+    remoteWorker["远端 Worker"] -. "主动发起认证长轮询" .-> gateway
     gateway -->|"结构化请求"| remoteWorker
     remoteWorker --> appServer["本机 codex app-server"]
     appServer <--> remoteState[("远端真实项目<br/>与用户 Codex Home")]
@@ -87,7 +89,7 @@ flowchart TB
 
 ### 管理远端电脑上的 Codex
 
-Remote Worker 不开放入站 Shell、远程桌面或通用隧道。它主动向服务器建立应用层 WSS 连接，只处理已注册项目的结构化请求。Codex 仍以那台电脑的交互用户运行，`cwd` 是真实项目目录，Codex Home 也是该用户原有目录，因此网页发起的 thread 与桌面 App 发起的 thread 可以共享同一套本机 Codex 历史。
+Remote Worker 不开放入站 Shell、远程桌面或通用隧道。当前 MVP 由 Worker 主动向服务器发起认证长轮询，只处理已注册项目的结构化请求。Codex 仍以那台电脑的交互用户运行，`cwd` 是真实项目目录，Codex Home 也是该用户原有目录。服务端保存返回的 Codex thread ID，使同一网页会话的后续轮次能够续接。
 
 ```mermaid
 sequenceDiagram
@@ -99,7 +101,7 @@ sequenceDiagram
     participant C as 本机 codex app-server
     participant P as 远端项目与 Codex Home
 
-    W->>G: 主动建立经过认证的 WSS
+    W->>G: 注册并持续发起认证长轮询
     A->>API: 打开项目并提交任务
     API->>API: 持久化指令与队列状态
     API->>G: 分派到指定执行器
@@ -110,16 +112,9 @@ sequenceDiagram
     W-->>G: 转发结构化事件
     G-->>API: 保存事件、消息和 thread ID
     API-->>A: 通过 SSE 展示实时过程
-    A->>API: 刷新桌面 App 新建的任务
-    API->>G: 请求 thread/list 与 thread/read
-    G->>W: 读取 cwd 匹配的 thread
-    W->>C: 列出并读取匹配的 thread
-    C-->>W: 返回 thread、turn 和 item
-    W-->>G: 分页返回 thread 更新
-    G-->>API: 幂等合并，最新任务优先
 ```
 
-远端同步是显式操作，而不是伪装成分布式文件系统。服务端通过 thread、turn 和 item ID 幂等合并；电脑离线时历史仍然保留，新任务等待执行器恢复。项目归档只做隐藏，不删除任务；归档期间停止显式同步，以后重新添加同一执行器上的同一文件夹即可恢复原历史，并可使用新名称。
+当前 MVP 不会导入桌面端创建的任意 thread，也不提供文件系统同步。远端生成文件仍留在该电脑；只有过程事件、thread ID 和最终文本回复返回 Codex Web。已选远端项目离线时会失败关闭，不会把任务改到 tenant 执行。
 
 ### 持久任务生命周期
 

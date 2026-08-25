@@ -17,6 +17,14 @@ import { loadAgentOptions, repairAgentSelection, resolveAgentSelection, type Age
 import { ensureTenant, ensureTenantWorkspace, isPersistedDeliverablePath, newId, persistDeliverableSync, removeCodexThreadFiles, removePersistedDeliverable, removeWorkspace, resolveInside, safeUploadName } from "./paths.js";
 import { AUDIO_MIME_EXTENSIONS, TranscriptionError, TranscriptionService } from "./transcription.js";
 import { buildUserCancellationSummary } from "./cancellation-summary.js";
+import { installRemoteExecutorApiRoutes } from "./remote-executor-api.js";
+import { RemoteExecutorStore } from "./remote-executor-store.js";
+import { RemoteRoutingRunner } from "./remote-runner-routing.js";
+import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
+import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
+import { installTaskboardApiRoutes } from "./taskboard-api.js";
+import { isBrowserOriginAllowed, shouldUseSecureCookie } from "./request-security.js";
+import { TaskboardStore } from "./taskboard-store.js";
 
 const COOKIE_NAME = "cww_session";
 const CONVERSATION_MESSAGE_PAGE_SIZE = 30;
@@ -79,8 +87,14 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     if (conversation.agent_model || conversation.reasoning_effort) conversationAgentSelection(conversation);
   }
 
+  const taskboardStore = new TaskboardStore(db);
+
   function publish(jobId: string, eventType: string, payload: unknown): void {
     const seq = db.appendEvent(jobId, eventType, payload);
+    if (["done", "failed"].includes(eventType)) {
+      try { taskboardStore.settleTaskForJob(jobId); }
+      catch { /* Taskboard reconciliation must never change the primary job result. */ }
+    }
     const livePayload = {
       ...(payload && typeof payload === "object" ? payload : { payload }),
       created_at: new Date().toISOString(),
@@ -94,7 +108,15 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     }
   }
 
-  const runner = new CodexRunner(config, db, publish);
+  const tenantRunner = new CodexRunner(config, db, publish);
+  const remoteWorkerGateway = new RemoteWorkerGateway();
+  const remoteExecutorStore = new RemoteExecutorStore(db);
+  const runner = new RemoteRoutingRunner(tenantRunner, db, {
+    store: remoteExecutorStore,
+    gateway: remoteWorkerGateway,
+    publish,
+    workspaceForConversation: (conversationId, userId) => ensureTenantWorkspace(config.tenantRoot, userId, conversationId),
+  });
   const transcription = new TranscriptionService(config);
   const voiceEnabled = Boolean(config.dashscopeApiKey && config.publicBaseUrl.startsWith("https://"));
   const deletingConversations = new Set<string>();
@@ -270,7 +292,22 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     crossOriginEmbedderPolicy: false,
   }));
   app.use(cookieParser());
+  // Keep one gateway even when transport is disabled. Persisted remote
+  // conversations then fail closed instead of falling back to the tenant.
+  const remoteWorkerToken = process.env.REMOTE_WORKER_TOKEN ?? "";
+  const remoteWorkerService = remoteWorkerToken
+    ? installRemoteWorkerHttpRoutes(app, {
+        token: remoteWorkerToken,
+        path: process.env.REMOTE_WORKER_PATH || "/codex-worker",
+        gateway: remoteWorkerGateway,
+      })
+    : undefined;
   app.use(express.json({ limit: "1mb" }));
+  installRemoteExecutorApiRoutes(app, db, config, {
+    store: remoteExecutorStore,
+    gateway: remoteWorkerGateway,
+    remoteEnabled: Boolean(remoteWorkerService),
+  });
 
   const router = express.Router();
   const api = express.Router();
@@ -301,10 +338,9 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     const csrfToken = crypto.randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.now() + config.sessionTtlHours * 3600_000);
     db.createSession(hashToken(token, config.sessionSecret), csrfToken, expiresAt.toISOString(), user.id);
-    const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
     res.cookie(COOKIE_NAME, token, {
       httpOnly: true,
-      secure: req.secure || forwardedProto === "https",
+      secure: shouldUseSecureCookie(req, config.publicBaseUrl),
       sameSite: "strict",
       path: config.basePath || "/",
       expires: expiresAt,
@@ -330,16 +366,19 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
     const session = res.locals.session as SessionRow;
     if (req.get("x-csrf-token") !== session.csrf_token) return res.status(403).json({ error: "安全校验失败，请刷新页面后重试。" });
-    const origin = req.get("origin");
-    const expectedHost = String(req.headers["x-forwarded-host"] ?? req.get("host") ?? "").split(",")[0].trim();
-    if (origin) {
-      try {
-        if (new URL(origin).host !== expectedHost) return res.status(403).json({ error: "请求来源不受信任。" });
-      } catch {
-        return res.status(403).json({ error: "请求来源不受信任。" });
-      }
-    }
+    if (!isBrowserOriginAllowed(req, config.publicBaseUrl)) return res.status(403).json({ error: "请求来源不受信任。" });
     return next();
+  });
+
+  installTaskboardApiRoutes(api, taskboardStore, remoteWorkerGateway, {
+    selectionForTask: (task, userId) => {
+      const conversation = task.conversation_id ? db.getConversationForUser(task.conversation_id, userId) : undefined;
+      return conversation ? conversationAgentSelection(conversation) : userAgentSelection(userId);
+    },
+    onJobQueued: () => {
+      publishQueuePositions();
+      if (config.queueAutoStart) setImmediate(() => void pumpQueue());
+    },
   });
 
   api.post("/auth/logout", (req, res) => {
@@ -518,7 +557,8 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
       await stopConversationJobs(conversation.id, false);
       for (const file of db.listFiles(conversation.id)) removePersistedDeliverable(config.dataRoot, file.relative_path);
       const tenant = ensureTenant(config.tenantRoot, session.user_id);
-      if (conversation.codex_thread_id && !db.isCodexThreadUsedByAnotherActiveConversation(conversation.codex_thread_id, conversation.id)) {
+      const executor = remoteExecutorStore.get(conversation.id);
+      if (executor.kind === "tenant" && conversation.codex_thread_id && !db.isCodexThreadUsedByAnotherActiveConversation(conversation.codex_thread_id, conversation.id)) {
         removeCodexThreadFiles(tenant.codexHome, conversation.codex_thread_id);
       }
       removeWorkspace(tenant.conversations, conversation.id);
@@ -979,7 +1019,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
 
   if (config.queueAutoStart) setImmediate(() => void pumpQueue());
   return {
-    app, db, runner, config, pumpQueue,
+    app, db, runner, config, pumpQueue, remoteWorkerGateway, remoteExecutorStore, remoteWorkerService, taskboardStore,
     beginShutdown: () => { shuttingDown = true; },
   };
 }
