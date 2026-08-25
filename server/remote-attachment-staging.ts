@@ -91,7 +91,11 @@ export function stageRemoteAttachments(
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    try { fs.rmSync(runtimeRoot, { recursive: true, force: true }); }
+    catch {
+      // Windows scanners or a late child-process handle can temporarily keep a
+      // file open. A stale directory is harmless and is pruned on next startup.
+    }
   };
 
   try {
@@ -143,7 +147,7 @@ function remoteRuntimeBaseRoot(): string {
 
 function safeFileName(value: string, index: number): string {
   const normalized = value.normalize("NFC").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim();
-  const compact = normalized.replace(/\s+/g, " ").slice(0, 160);
+  const compact = normalized.replace(/\s+/g, " ").slice(0, 96).replace(/[. ]+$/g, "");
   return compact || `attachment-${index + 1}`;
 }
 
