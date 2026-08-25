@@ -102,14 +102,6 @@
 .remote-executor-note.locked { color: #755116; background: var(--amber-pale); }
 .remote-executor-error { color: var(--danger); border: 1px solid rgba(169, 50, 60, .2); background: var(--danger-pale); }
 
-/* The first transport intentionally does not stage browser uploads. The API
-   guard remains authoritative; this is the matching visual affordance. */
-html[data-executor-kind="remote"] .composer .attach-button {
-  opacity: .43;
-  pointer-events: none;
-  filter: grayscale(.25);
-}
-
 html[data-theme="dark"] .remote-executor-trigger {
   border-color: rgba(255, 255, 255, .13);
   color: #f2f3f8;
