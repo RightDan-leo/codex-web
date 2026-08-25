@@ -21,7 +21,6 @@ const hello = {
 
 function createTestService() {
   const app = express();
-  app.use(express.json());
   const service = installRemoteWorkerHttpRoutes(app, { token, path: "/codex-worker" });
   return { app, service };
 }
@@ -79,4 +78,20 @@ test("remote worker HTTP transport carries a complete run round trip", async () 
 test("remote worker HTTP service rejects weak shared tokens", () => {
   const app = express();
   assert.throws(() => installRemoteWorkerHttpRoutes(app, { token: "too-short" }), /at least 32 characters/);
+});
+
+test("remote worker HTTP service bounds JSON bodies and validates its mount path", async () => {
+  const { app, service } = createTestService();
+  try {
+    await request(app).post("/codex-worker/register")
+      .set("Authorization", `Bearer ${token}`)
+      .set("Content-Type", "application/json")
+      .send(JSON.stringify({ ...hello, displayName: "x".repeat(800 * 1024) }))
+      .expect(413);
+  } finally { service.close(); }
+
+  assert.throws(
+    () => installRemoteWorkerHttpRoutes(express(), { token, path: "/../api" }),
+    /path is invalid/i,
+  );
 });

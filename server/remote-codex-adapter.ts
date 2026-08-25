@@ -28,10 +28,11 @@ export type RemoteAppServerStarter = (
   callbacks: RemoteAppServerCallbacks,
 ) => AppServerTurnExecution;
 
-const SAFE_SHELL_ENVIRONMENT_KEYS = new Set([
+const SAFE_REMOTE_ENVIRONMENT_KEYS = new Set([
   "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
   "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "SHELL",
-  "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR",
+  "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "USER", "LOGNAME",
+  "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "FORCE_COLOR", "CODEX_HOME", "CWW_REMOTE_JOB_ROOT",
 ]);
 
@@ -49,17 +50,17 @@ export function createRemoteCodexStarter(
 
   return (input, callbacks) => {
     const stat = fs.statSync(input.cwd, { throwIfNoEntry: false });
-    if (!stat?.isDirectory()) throw new Error(`Remote project cwd does not exist: ${input.cwd}`);
+    if (!stat?.isDirectory()) throw new Error("Registered remote project directory is unavailable");
 
     if (input.codexHome) {
       const codexHomeStat = fs.statSync(input.codexHome, { throwIfNoEntry: false });
-      if (!codexHomeStat?.isDirectory()) throw new Error(`Remote project CODEX_HOME does not exist: ${input.codexHome}`);
+      if (!codexHomeStat?.isDirectory()) throw new Error("Registered remote CODEX_HOME is unavailable");
     }
 
     const runtimeRoot = input.runtimeRoot ? path.resolve(input.runtimeRoot) : undefined;
     if (runtimeRoot) {
       const runtimeStat = fs.statSync(runtimeRoot, { throwIfNoEntry: false });
-      if (!runtimeStat?.isDirectory()) throw new Error(`Remote job runtime does not exist: ${runtimeRoot}`);
+      if (!runtimeStat?.isDirectory()) throw new Error("Remote attachment runtime is unavailable");
     }
     const imagePaths = (input.imagePaths ?? []).map((imagePath) => {
       if (!runtimeRoot) throw new Error("Remote image attachment requires a staged runtime directory");
@@ -68,58 +69,69 @@ export function createRemoteCodexStarter(
         throw new Error("Remote image path escapes the staged runtime directory");
       }
       const imageStat = fs.statSync(resolved, { throwIfNoEntry: false });
-      if (!imageStat?.isFile()) throw new Error(`Remote image attachment does not exist: ${resolved}`);
+      if (!imageStat?.isFile()) throw new Error("Remote image attachment is unavailable");
       return resolved;
     });
 
     const controller = new AbortController();
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    // The bearer token is only for the worker-to-server control channel. The
-    // Codex app-server and its spawned shell commands must never inherit it.
-    delete env.REMOTE_WORKER_TOKEN;
+    const env = buildRemoteCodexEnvironment(process.env);
     if (input.codexHome) env.CODEX_HOME = input.codexHome;
     if (runtimeRoot) env.CWW_REMOTE_JOB_ROOT = runtimeRoot;
-    const shellEnvironment = safeShellEnvironment(env);
+    const shellEnvironment = buildRemoteCodexEnvironment(env);
     const runtimeWorkspaceRoots = runtimeRoot ? [input.cwd, runtimeRoot] : [input.cwd];
 
-    const execution = startTurn({
-      ...(config.executablePath ? { executablePath: config.executablePath } : {}),
-      cwd: input.cwd,
-      env,
-      threadId: input.threadId ?? null,
-      prompt: input.prompt,
-      imagePaths,
-      model: input.model ?? config.defaultModel,
-      reasoningEffort: input.reasoningEffort ?? config.defaultReasoningEffort,
-      library: runtimeRoot ?? input.cwd,
-      shellEnvironment,
-      networkAccessEnabled: config.networkAccessEnabled ?? true,
-      webSearchMode: config.webSearchMode ?? "live",
-      sandbox: config.sandbox ?? "workspace-write",
-      runtimeWorkspaceRoots,
-      optionalCapabilities: { ...DEFAULT_OPTIONAL_AGENT_CAPABILITIES },
-    }, {
-      signal: controller.signal,
-      onThreadStarted: callbacks.onThreadStarted,
-      onProgress: callbacks.onProgress,
+    let execution: AppServerTurnExecution;
+    try {
+      execution = startTurn({
+        executablePath: config.executablePath ?? "codex",
+        cwd: input.cwd,
+        env,
+        threadId: input.threadId ?? null,
+        prompt: input.prompt,
+        imagePaths,
+        model: input.model ?? config.defaultModel,
+        reasoningEffort: input.reasoningEffort ?? config.defaultReasoningEffort,
+        library: runtimeRoot ?? input.cwd,
+        shellEnvironment,
+        networkAccessEnabled: config.networkAccessEnabled ?? true,
+        webSearchMode: config.webSearchMode ?? "live",
+        sandbox: config.sandbox ?? "workspace-write",
+        runtimeWorkspaceRoots,
+        optionalCapabilities: { ...DEFAULT_OPTIONAL_AGENT_CAPABILITIES },
+      }, {
+        signal: controller.signal,
+        onThreadStarted: callbacks.onThreadStarted,
+        onProgress: callbacks.onProgress,
+      });
+    } catch {
+      throw new Error("Unable to start the local Codex app-server");
+    }
+    const result = execution.result.catch((error: unknown) => {
+      const cancelled = error instanceof Error && error.name === "AbortError";
+      const safe = new Error(cancelled ? "Remote Codex task was cancelled" : "Remote Codex app-server failed");
+      if (cancelled) safe.name = "AbortError";
+      throw safe;
     });
 
     return {
-      result: execution.result,
+      result,
       steer: (prompt) => execution.steer(prompt),
       interrupt: () => {
         controller.abort();
         execution.interrupt();
+        const forceTimer = setTimeout(() => execution.terminate?.(), 5_000);
+        forceTimer.unref?.();
       },
     };
   };
 }
 
-function safeShellEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+export function buildRemoteCodexEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (typeof value !== "string" || !SAFE_SHELL_ENVIRONMENT_KEYS.has(key.toUpperCase())) continue;
-    result[key] = value;
+    const canonicalKey = key.toUpperCase();
+    if (typeof value !== "string" || !SAFE_REMOTE_ENVIRONMENT_KEYS.has(canonicalKey)) continue;
+    result[canonicalKey] = value;
   }
   return result;
 }

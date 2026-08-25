@@ -3,6 +3,11 @@ export const REMOTE_WORKER_PROTOCOL_VERSION = 1 as const;
 export const REMOTE_ATTACHMENT_MAX_FILES = 12;
 export const REMOTE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
 export const REMOTE_ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
+export const REMOTE_PROMPT_MAX_CHARS = 100_000;
+export const REMOTE_PROGRESS_MAX_BYTES = 64 * 1024;
+export const REMOTE_PROGRESS_MAX_EVENTS = 1_000;
+export const REMOTE_RESULT_MAX_BYTES = 512 * 1024;
+export const REMOTE_ERROR_MAX_CHARS = 8_000;
 
 export type RemoteWorkerPlatform = "linux" | "darwin" | "win32";
 
@@ -159,6 +164,23 @@ function hasCurrentVersion(value: Record<string, unknown>): boolean {
   return value.protocolVersion === REMOTE_WORKER_PROTOCOL_VERSION;
 }
 
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw new Error(`Unexpected field in ${label}`);
+}
+
+function boundedString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length <= maxLength;
+}
+
+function jsonByteLength(value: unknown): number {
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(value); }
+  catch { throw new Error("Remote progress payload must be JSON serializable"); }
+  if (serialized === undefined) throw new Error("Remote progress payload must be JSON serializable");
+  return Buffer.byteLength(serialized, "utf8");
+}
+
 function validateAttachments(value: unknown): void {
   if (value === undefined) return;
   if (!Array.isArray(value) || value.length > REMOTE_ATTACHMENT_MAX_FILES) {
@@ -167,6 +189,7 @@ function validateAttachments(value: unknown): void {
   let totalBytes = 0;
   for (const attachment of value) {
     if (!isObject(attachment)) throw new Error("Invalid remote attachment");
+    assertOnlyKeys(attachment, ["name", "mimeType", "size", "sha256", "contentBase64"], "remote attachment");
     if (typeof attachment.name !== "string" || !attachment.name.trim() || attachment.name.length > 180 || /[\u0000\r\n]/.test(attachment.name)) {
       throw new Error("Invalid remote attachment name");
     }
@@ -193,26 +216,30 @@ export function validateWorkerHello(value: unknown): WorkerHelloMessage {
   if (!isObject(value) || value.type !== "worker.hello" || !hasCurrentVersion(value)) {
     throw new Error("Invalid remote worker hello message");
   }
-  if (!isSafeId(value.workerId) || typeof value.displayName !== "string" || !value.displayName.trim()) {
+  assertOnlyKeys(value, ["type", "protocolVersion", "workerId", "displayName", "capabilities", "projects"], "remote worker hello");
+  if (!isSafeId(value.workerId) || !boundedString(value.displayName, 160) || !value.displayName.trim()) {
     throw new Error("Invalid remote worker identity");
   }
   if (!isObject(value.capabilities)) throw new Error("Invalid remote worker capabilities");
+  assertOnlyKeys(value.capabilities, ["platform", "arch", "codexVersion", "supportsSteering", "supportsInterrupt", "supportsAttachments"], "remote worker capabilities");
   const platform = value.capabilities.platform;
   if (!(["linux", "darwin", "win32"] as unknown[]).includes(platform)) throw new Error("Invalid remote worker platform");
-  if (typeof value.capabilities.arch !== "string" || !value.capabilities.arch) throw new Error("Invalid remote worker architecture");
+  if (!boundedString(value.capabilities.arch, 64) || !value.capabilities.arch) throw new Error("Invalid remote worker architecture");
   if (typeof value.capabilities.supportsSteering !== "boolean" || typeof value.capabilities.supportsInterrupt !== "boolean") {
     throw new Error("Invalid remote worker capability flags");
   }
   if (value.capabilities.supportsAttachments !== undefined && typeof value.capabilities.supportsAttachments !== "boolean") {
     throw new Error("Invalid remote worker attachment capability");
   }
-  if (value.capabilities.codexVersion !== undefined && typeof value.capabilities.codexVersion !== "string") {
+  if (value.capabilities.codexVersion !== undefined && !boundedString(value.capabilities.codexVersion, 160)) {
     throw new Error("Invalid remote worker Codex version");
   }
   if (!Array.isArray(value.projects) || value.projects.length > 128) throw new Error("Invalid remote worker project list");
   const seen = new Set<string>();
   for (const project of value.projects) {
-    if (!isObject(project) || !isSafeId(project.id) || typeof project.name !== "string" || !project.name.trim()) {
+    if (!isObject(project)) throw new Error("Invalid remote worker project");
+    assertOnlyKeys(project, ["id", "name"], "remote worker project");
+    if (!isSafeId(project.id) || !boundedString(project.name, 160) || !project.name.trim()) {
       throw new Error("Invalid remote worker project");
     }
     if (seen.has(project.id)) throw new Error("Duplicate remote worker project id");
@@ -228,21 +255,25 @@ export function validateServerMessage(value: unknown): ServerToWorkerMessage {
   if (!isSafeId(value.requestId)) throw new Error("Invalid remote worker request id");
   switch (value.type) {
     case "server.run":
-      if (!isSafeId(value.jobId) || !isSafeId(value.projectId) || typeof value.prompt !== "string" || !value.prompt.trim()) {
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "projectId", "prompt", "codexThreadId", "model", "reasoningEffort", "attachments"], "remote run request");
+      if (!isSafeId(value.jobId) || !isSafeId(value.projectId) || !boundedString(value.prompt, REMOTE_PROMPT_MAX_CHARS) || !value.prompt.trim()) {
         throw new Error("Invalid remote run request");
       }
       if (value.codexThreadId !== undefined && !isSafeId(value.codexThreadId)) throw new Error("Invalid remote Codex thread id");
-      if (value.model !== undefined && typeof value.model !== "string") throw new Error("Invalid remote model");
-      if (value.reasoningEffort !== undefined && typeof value.reasoningEffort !== "string") throw new Error("Invalid reasoning effort");
+      if (value.model !== undefined && (!boundedString(value.model, 160) || !value.model.trim())) throw new Error("Invalid remote model");
+      if (value.reasoningEffort !== undefined && (!boundedString(value.reasoningEffort, 64) || !value.reasoningEffort.trim())) throw new Error("Invalid reasoning effort");
       validateAttachments(value.attachments);
       return value as ServerRunMessage;
     case "server.steer":
-      if (!isSafeId(value.jobId) || typeof value.prompt !== "string" || !value.prompt.trim()) throw new Error("Invalid remote steer request");
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "prompt"], "remote steer request");
+      if (!isSafeId(value.jobId) || !boundedString(value.prompt, REMOTE_PROMPT_MAX_CHARS) || !value.prompt.trim()) throw new Error("Invalid remote steer request");
       return value as ServerSteerMessage;
     case "server.cancel":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId"], "remote cancel request");
       if (!isSafeId(value.jobId)) throw new Error("Invalid remote cancel request");
       return value as ServerCancelMessage;
     case "server.ping":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId"], "remote ping request");
       return value as ServerPingMessage;
     default:
       throw new Error("Unknown remote worker server message");
@@ -254,32 +285,41 @@ export function validateWorkerMessage(value: unknown): WorkerToServerMessage {
     throw new Error("Invalid remote worker message");
   }
   if (value.type === "worker.ready") {
+    assertOnlyKeys(value, ["type", "protocolVersion", "workerId"], "remote worker ready message");
     if (!isSafeId(value.workerId)) throw new Error("Invalid ready worker id");
     return value as WorkerReadyMessage;
   }
   if (!isSafeId(value.requestId)) throw new Error("Invalid remote worker request id");
   switch (value.type) {
     case "worker.thread.started":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "threadId"], "remote thread event");
       if (!isSafeId(value.jobId) || !isSafeId(value.threadId)) throw new Error("Invalid remote thread event");
       return value as WorkerThreadStartedMessage;
     case "worker.progress":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "payload"], "remote progress event");
       if (!isSafeId(value.jobId)) throw new Error("Invalid remote progress event");
+      if (jsonByteLength(value.payload) > REMOTE_PROGRESS_MAX_BYTES) throw new Error("Remote progress payload exceeds the size limit");
       return value as WorkerProgressMessage;
     case "worker.steered":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "turnId"], "remote steer acknowledgement");
       if (!isSafeId(value.jobId)) throw new Error("Invalid remote steer acknowledgement");
       if (value.turnId !== undefined && !isSafeId(value.turnId)) throw new Error("Invalid remote steered turn id");
       return value as WorkerSteeredMessage;
     case "worker.result":
-      if (!isSafeId(value.jobId) || typeof value.result !== "string") throw new Error("Invalid remote result event");
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "result"], "remote result event");
+      if (!isSafeId(value.jobId) || typeof value.result !== "string" || Buffer.byteLength(value.result, "utf8") > REMOTE_RESULT_MAX_BYTES) throw new Error("Invalid remote result event");
       return value as WorkerResultMessage;
     case "worker.error":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId", "message"], "remote error event");
       if (value.jobId !== undefined && !isSafeId(value.jobId)) throw new Error("Invalid remote error job id");
-      if (typeof value.message !== "string" || !value.message) throw new Error("Invalid remote error event");
+      if (!boundedString(value.message, REMOTE_ERROR_MAX_CHARS) || !value.message) throw new Error("Invalid remote error event");
       return value as WorkerErrorMessage;
     case "worker.cancelled":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId", "jobId"], "remote cancellation event");
       if (!isSafeId(value.jobId)) throw new Error("Invalid remote cancellation event");
       return value as WorkerCancelledMessage;
     case "worker.pong":
+      assertOnlyKeys(value, ["type", "protocolVersion", "requestId"], "remote pong message");
       return value as WorkerPongMessage;
     default:
       throw new Error("Unknown remote worker message");

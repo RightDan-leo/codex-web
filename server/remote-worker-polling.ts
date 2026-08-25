@@ -96,15 +96,23 @@ export class RemoteWorkerPollingHub {
     this.gateway.receive(session.workerId, rawMessage);
   }
 
+  cancelPoll(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session?.waiter) return false;
+    const waiter = session.waiter;
+    session.waiter = undefined;
+    clearTimeout(waiter.timer);
+    waiter.resolve(null);
+    return true;
+  }
+
   close(sessionId: string, reason = "remote worker polling session closed"): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.sessions.delete(sessionId);
     if (this.sessionByWorker.get(session.workerId) === sessionId) this.sessionByWorker.delete(session.workerId);
     if (session.waiter) {
-      clearTimeout(session.waiter.timer);
-      session.waiter.resolve(null);
-      session.waiter = undefined;
+      this.cancelPoll(sessionId);
     }
     this.gateway.detach(session.workerId, reason);
   }

@@ -1,5 +1,8 @@
 import { stageRemoteAttachments } from "./remote-attachment-staging.js";
 import {
+  REMOTE_ERROR_MAX_CHARS,
+  REMOTE_PROGRESS_MAX_BYTES,
+  REMOTE_RESULT_MAX_BYTES,
   REMOTE_WORKER_PROTOCOL_VERSION,
   type ServerToWorkerMessage,
   type WorkerToServerMessage,
@@ -67,8 +70,16 @@ export class RemoteWorkerRuntime {
   shutdown(): void {
     for (const active of this.activeRuns.values()) {
       active.cancelled = true;
-      active.execution.interrupt?.();
+      safeInterrupt(active.execution);
     }
+  }
+
+  async waitForIdle(timeoutMs = 10_000): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (this.activeRuns.size > 0 && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    return this.activeRuns.size === 0;
   }
 
   async handle(rawMessage: unknown, emit: WorkerEmit): Promise<void> {
@@ -139,7 +150,7 @@ export class RemoteWorkerRuntime {
           protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
           requestId: message.requestId,
           jobId: message.jobId,
-          payload,
+          payload: boundedProgress(payload),
         }),
       });
     } catch (error) {
@@ -149,7 +160,7 @@ export class RemoteWorkerRuntime {
         protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
         requestId: message.requestId,
         jobId: message.jobId,
-        message: error instanceof Error ? error.message : "Unable to start remote Codex",
+        message: remoteErrorMessage(error, "Unable to start remote Codex", [project.cwd, project.codexHome, staged?.runtimeRoot]),
       });
       return;
     }
@@ -175,13 +186,23 @@ export class RemoteWorkerRuntime {
     try {
       const result = await execution.result;
       if (!active.cancelled) {
-        emit({
-          type: "worker.result",
-          protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
-          requestId: message.requestId,
-          jobId: message.jobId,
-          result,
-        });
+        if (Buffer.byteLength(result, "utf8") > REMOTE_RESULT_MAX_BYTES) {
+          emit({
+            type: "worker.error",
+            protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+            requestId: message.requestId,
+            jobId: message.jobId,
+            message: "Remote Codex result exceeds the response size limit",
+          });
+        } else {
+          emit({
+            type: "worker.result",
+            protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+            requestId: message.requestId,
+            jobId: message.jobId,
+            result,
+          });
+        }
       }
     } catch (error) {
       if (!active.cancelled) {
@@ -190,7 +211,7 @@ export class RemoteWorkerRuntime {
           protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
           requestId: message.requestId,
           jobId: message.jobId,
-          message: error instanceof Error ? error.message : "Remote Codex failed",
+          message: remoteErrorMessage(error, "Remote Codex failed", [project.cwd, project.codexHome, staged.runtimeRoot]),
         });
       }
     } finally {
@@ -226,7 +247,7 @@ export class RemoteWorkerRuntime {
         protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
         requestId,
         jobId,
-        message: error instanceof Error ? error.message : "Unable to steer remote Codex",
+        message: remoteErrorMessage(error, "Unable to steer remote Codex"),
       });
     }
   }
@@ -235,7 +256,7 @@ export class RemoteWorkerRuntime {
     const active = this.activeRuns.get(jobId);
     if (!active) return;
     active.cancelled = true;
-    active.execution.interrupt?.();
+    safeInterrupt(active.execution);
     emit({
       type: "worker.cancelled",
       protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
@@ -243,4 +264,34 @@ export class RemoteWorkerRuntime {
       jobId,
     });
   }
+}
+
+function safeInterrupt(execution: RemoteCodexExecution): void {
+  try { execution.interrupt?.(); }
+  catch { /* Cancellation must remain idempotent even if the local adapter already stopped. */ }
+}
+
+function boundedProgress(payload: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(payload);
+    if (serialized !== undefined && Buffer.byteLength(serialized, "utf8") <= REMOTE_PROGRESS_MAX_BYTES) return payload;
+  } catch { /* Replace non-serializable progress with a bounded status event. */ }
+  return { kind: "status", label: "Remote progress update omitted because it exceeded the transport limit" };
+}
+
+function remoteErrorMessage(error: unknown, fallback: string, localPaths: Array<string | undefined> = []): string {
+  let message = error instanceof Error && error.message ? error.message : fallback;
+  for (const localPath of localPaths) {
+    if (!localPath) continue;
+    message = message.split(localPath).join("[local path]");
+    if (process.platform === "win32") message = message.toLowerCase().includes(localPath.toLowerCase())
+      ? replaceCaseInsensitive(message, localPath, "[local path]")
+      : message;
+  }
+  return message.slice(0, REMOTE_ERROR_MAX_CHARS) || fallback;
+}
+
+function replaceCaseInsensitive(value: string, search: string, replacement: string): string {
+  const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value.replace(new RegExp(escaped, "gi"), replacement);
 }

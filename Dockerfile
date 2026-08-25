@@ -20,7 +20,9 @@ FROM source AS build
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS codex-baked
-ARG CODEX_CLI_VERSION=latest
+# Keep the baked CLI aligned with the locked @openai/codex-sdk version. Operators
+# can override this build arg deliberately after compatibility testing.
+ARG CODEX_CLI_VERSION=0.144.1
 RUN npm install --global --prefix /opt/codex-baked "@openai/codex@${CODEX_CLI_VERSION}" \
     && /opt/codex-baked/bin/codex --version
 

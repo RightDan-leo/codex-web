@@ -33,7 +33,7 @@ test("worker verifies and stages attachments in a disposable runtime", () => {
     assert.deepEqual(fs.readFileSync(staged.attachments[1].absolutePath), image);
     assert.deepEqual(staged.imagePaths, [staged.attachments[1].absolutePath]);
     assert.match(staged.prompt, /disposable worker-owned directory/);
-    assert.equal(staged.prompt.includes(staged.attachments[0].absolutePath), true);
+    assert.equal(staged.prompt.includes(JSON.stringify(staged.attachments[0].absolutePath)), true);
   } finally {
     const runtimeRoot = staged.runtimeRoot!;
     staged.cleanup();
@@ -73,7 +73,8 @@ test("remote worker runtime cleans staged files after the Codex turn settles", a
     await Promise.resolve();
     assert.ok(captured?.runtimeRoot);
     assert.equal(fs.existsSync(captured!.runtimeRoot!), true);
-    assert.equal(captured?.prompt.includes(captured!.runtimeRoot!), true);
+    const escapedRuntimeRoot = JSON.stringify(captured!.runtimeRoot!).slice(1, -1);
+    assert.equal(captured?.prompt.includes(escapedRuntimeRoot), true);
     finish("completed");
     await handling;
     assert.equal(fs.existsSync(captured!.runtimeRoot!), false);

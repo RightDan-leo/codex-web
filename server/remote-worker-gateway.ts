@@ -1,5 +1,6 @@
 import {
   REMOTE_WORKER_PROTOCOL_VERSION,
+  REMOTE_PROGRESS_MAX_EVENTS,
   type RemoteAttachmentPayload,
   type ServerCancelMessage,
   type ServerRunMessage,
@@ -50,6 +51,7 @@ type PendingRun = {
   resolve(value: string): void;
   reject(error: Error): void;
   callbacks: RemoteRunCallbacks;
+  progressCount: number;
 };
 
 type PendingCommand = {
@@ -58,6 +60,11 @@ type PendingCommand = {
   workerId: string;
   resolve(value: string): void;
   reject(error: Error): void;
+  timer: NodeJS.Timeout;
+};
+
+export type RemoteWorkerGatewayOptions = {
+  commandTimeoutMs?: number;
 };
 
 export type RemoteWorkerStatus = {
@@ -73,7 +80,12 @@ export class RemoteWorkerGateway {
   private readonly pendingByRequest = new Map<string, PendingRun>();
   private readonly pendingByJob = new Map<string, PendingRun>();
   private readonly pendingCommands = new Map<string, PendingCommand>();
+  private readonly commandTimeoutMs: number;
   private requestSequence = 0;
+
+  constructor(options: RemoteWorkerGatewayOptions = {}) {
+    this.commandTimeoutMs = Math.max(10, options.commandTimeoutMs ?? 15_000);
+  }
 
   attach(rawHello: unknown, transport: RemoteWorkerTransport): RemoteWorkerStatus {
     const hello = validateWorkerHello(rawHello);
@@ -105,7 +117,7 @@ export class RemoteWorkerGateway {
     }
     for (const command of [...this.pendingCommands.values()]) {
       if (command.workerId !== workerId) continue;
-      this.pendingCommands.delete(command.requestId);
+      this.removeCommand(command);
       command.reject(new Error(reason));
     }
   }
@@ -149,7 +161,7 @@ export class RemoteWorkerGateway {
       resolve = resolveResult;
       reject = rejectResult;
     });
-    const pending: PendingRun = { requestId, jobId: input.jobId, workerId, resolve, reject, callbacks };
+    const pending: PendingRun = { requestId, jobId: input.jobId, workerId, resolve, reject, callbacks, progressCount: 0 };
     this.pendingByRequest.set(requestId, pending);
     this.pendingByJob.set(input.jobId, pending);
 
@@ -157,6 +169,8 @@ export class RemoteWorkerGateway {
       session.transport.send(message);
     } catch (error) {
       this.removePending(pending);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+      void result.catch(() => undefined);
       throw error;
     }
 
@@ -182,17 +196,26 @@ export class RemoteWorkerGateway {
           resolveSteer = resolveCommand;
           rejectSteer = rejectCommand;
         });
-        this.pendingCommands.set(steerRequestId, {
+        const timer = setTimeout(() => {
+          const command = this.pendingCommands.get(steerRequestId);
+          if (!command) return;
+          this.removeCommand(command);
+          command.reject(new Error("Remote steering acknowledgement timed out"));
+        }, this.commandTimeoutMs);
+        timer.unref?.();
+        const command: PendingCommand = {
           requestId: steerRequestId,
           jobId: input.jobId,
           workerId: current.workerId,
           resolve: resolveSteer,
           reject: rejectSteer,
-        });
+          timer,
+        };
+        this.pendingCommands.set(steerRequestId, command);
         try {
           activeSession.transport.send(steer);
         } catch (error) {
-          this.pendingCommands.delete(steerRequestId);
+          this.removeCommand(command);
           rejectSteer(error instanceof Error ? error : new Error(String(error)));
         }
         return accepted;
@@ -200,6 +223,10 @@ export class RemoteWorkerGateway {
       interrupt: () => {
         const current = this.pendingByJob.get(input.jobId);
         if (!current) return;
+        this.removePending(current);
+        const cancelled = new Error("Remote job was cancelled");
+        cancelled.name = "AbortError";
+        current.reject(cancelled);
         const activeSession = this.workers.get(current.workerId);
         if (!activeSession) return;
         if (!activeSession.hello.capabilities.supportsInterrupt) return;
@@ -209,7 +236,8 @@ export class RemoteWorkerGateway {
           requestId: this.nextRequestId(input.jobId),
           jobId: input.jobId,
         };
-        activeSession.transport.send(cancel);
+        try { activeSession.transport.send(cancel); }
+        catch { /* Cancellation is already final locally; transport is best effort. */ }
       },
     };
   }
@@ -218,16 +246,21 @@ export class RemoteWorkerGateway {
     const session = this.workers.get(workerId);
     if (!session) throw new Error(`Unknown remote worker: ${workerId}`);
     const message: WorkerToServerMessage = validateWorkerMessage(rawMessage);
-    if (message.type === "worker.ready" || message.type === "worker.pong") return;
+    if (message.type === "worker.ready") {
+      if (message.workerId !== workerId) throw new Error("Remote worker ready identity does not match its session");
+      return;
+    }
+    if (message.type === "worker.pong") return;
 
     const command = this.pendingCommands.get(message.requestId);
     if (command) {
       if (command.workerId !== workerId) throw new Error("Remote worker attempted to answer another worker's command");
+      if (!("jobId" in message) || message.jobId !== command.jobId) throw new Error("Remote worker command job id does not match its request");
       if (message.type === "worker.steered") {
-        this.pendingCommands.delete(command.requestId);
+        this.removeCommand(command);
         command.resolve(message.turnId || `remote:${command.jobId}:${command.requestId}`);
       } else if (message.type === "worker.error") {
-        this.pendingCommands.delete(command.requestId);
+        this.removeCommand(command);
         command.reject(new Error(message.message));
       }
       return;
@@ -236,12 +269,19 @@ export class RemoteWorkerGateway {
     const pending = this.pendingByRequest.get(message.requestId);
     if (!pending) return;
     if (pending.workerId !== workerId) throw new Error("Remote worker attempted to answer another worker's request");
+    if (!("jobId" in message) || message.jobId !== pending.jobId) throw new Error("Remote worker job id does not match its request");
 
     switch (message.type) {
       case "worker.thread.started":
         pending.callbacks.onThreadStarted?.(message.threadId);
         return;
       case "worker.progress":
+        pending.progressCount += 1;
+        if (pending.progressCount > REMOTE_PROGRESS_MAX_EVENTS) {
+          this.removePending(pending);
+          pending.reject(new Error("Remote worker sent too many progress updates"));
+          return;
+        }
         pending.callbacks.onProgress?.(message.payload);
         return;
       case "worker.result":
@@ -266,9 +306,15 @@ export class RemoteWorkerGateway {
     if (this.pendingByJob.get(pending.jobId) === pending) this.pendingByJob.delete(pending.jobId);
     for (const command of [...this.pendingCommands.values()]) {
       if (command.jobId !== pending.jobId) continue;
-      this.pendingCommands.delete(command.requestId);
+      this.removeCommand(command);
       command.reject(new Error("Remote job is no longer running"));
     }
+  }
+
+  private removeCommand(command: PendingCommand): void {
+    if (this.pendingCommands.get(command.requestId) !== command) return;
+    this.pendingCommands.delete(command.requestId);
+    clearTimeout(command.timer);
   }
 
   private nextRequestId(jobId: string): string {

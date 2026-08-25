@@ -61,3 +61,38 @@ test("worker reconnect replaces its previous polling session", async () => {
   assert.throws(() => hub.receive(first.sessionId, { type: "worker.pong", protocolVersion: 1, requestId: "old:1" }), /Unknown remote worker polling session/);
   assert.equal(gateway.hasProject("project-a"), true);
 });
+
+test("cancelled long polls release their waiter and allow a replacement", async () => {
+  const gateway = new RemoteWorkerGateway();
+  const hub = new RemoteWorkerPollingHub(gateway);
+  const { sessionId } = hub.register(hello);
+  const first = hub.poll(sessionId);
+  assert.equal(hub.cancelPoll(sessionId), true);
+  assert.equal(await first, null);
+
+  const replacement = hub.poll(sessionId);
+  const execution = gateway.start({ jobId: "job-after-cancelled-poll", projectId: "project-a", prompt: "work" });
+  const run = await replacement;
+  assert.equal(run?.type, "server.run");
+  execution.interrupt();
+  await assert.rejects(execution.result, /cancelled/i);
+  hub.close();
+});
+
+test("a replaced session cannot complete an in-flight job", async () => {
+  const gateway = new RemoteWorkerGateway();
+  const hub = new RemoteWorkerPollingHub(gateway);
+  const first = hub.register(hello);
+  const execution = gateway.start({ jobId: "job-stale-session", projectId: "project-a", prompt: "work" });
+  const run = await hub.poll(first.sessionId);
+  assert.equal(run?.type, "server.run");
+  hub.register(hello);
+  await assert.rejects(execution.result, /reconnected/i);
+  assert.throws(() => hub.receive(first.sessionId, {
+    type: "worker.result",
+    protocolVersion: 1,
+    requestId: run!.requestId,
+    jobId: "job-stale-session",
+    result: "late completion",
+  }), /Unknown remote worker polling session/);
+});

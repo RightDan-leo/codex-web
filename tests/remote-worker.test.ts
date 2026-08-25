@@ -20,25 +20,25 @@ const hello = {
     supportsSteering: true,
     supportsInterrupt: true,
   },
-  projects: [{ id: "magic-zombie", name: "MagicZombie" }],
+  projects: [{ id: "sample-project", name: "Sample Project" }],
 };
 
 test("gateway dispatches only to advertised remote projects", async () => {
   const gateway = new RemoteWorkerGateway();
   const sent: unknown[] = [];
   gateway.attach(hello, { send: (message) => sent.push(message) });
-  assert.equal(gateway.hasProject("magic-zombie"), true);
+  assert.equal(gateway.hasProject("sample-project"), true);
   assert.throws(() => gateway.start({ jobId: "job-404", projectId: "unknown", prompt: "x" }), /No online remote worker/);
 
   let threadId = "";
   const progress: unknown[] = [];
-  const execution = gateway.start({ jobId: "job-1", projectId: "magic-zombie", prompt: "fix login" }, {
+  const execution = gateway.start({ jobId: "job-1", projectId: "sample-project", prompt: "fix login" }, {
     onThreadStarted: (value) => { threadId = value; },
     onProgress: (value) => progress.push(value),
   });
   const run = sent[0] as { type: string; requestId: string; projectId: string; cwd?: string };
   assert.equal(run.type, "server.run");
-  assert.equal(run.projectId, "magic-zombie");
+  assert.equal(run.projectId, "sample-project");
   assert.equal("cwd" in run, false);
 
   gateway.receive("macbook-pro", { type: "worker.thread.started", protocolVersion: 1, requestId: run.requestId, jobId: "job-1", threadId: "thread-1" });
@@ -54,7 +54,7 @@ test("runtime resolves project id to local cwd instead of accepting a server pat
   let finish!: (value: string) => void;
   const result = new Promise<string>((resolve) => { finish = resolve; });
   const runtime = new RemoteWorkerRuntime([
-    { id: "magic-zombie", name: "MagicZombie", cwd: "/Users/dan/Projects/MagicZombie", codexHome: "/Users/dan/.codex" },
+    { id: "sample-project", name: "Sample Project", cwd: "/srv/projects/sample-project", codexHome: "/srv/test-user/.codex" },
   ], (input, callbacks) => {
     receivedInput = input;
     callbacks.onThreadStarted("local-thread");
@@ -64,11 +64,11 @@ test("runtime resolves project id to local cwd instead of accepting a server pat
   const emitted: Array<{ type: string; result?: string }> = [];
   const handling = runtime.handle({
     type: "server.run", protocolVersion: 1, requestId: "request-1", jobId: "job-1",
-    projectId: "magic-zombie", prompt: "implement feature",
+    projectId: "sample-project", prompt: "implement feature",
   }, (message) => emitted.push(message));
   await Promise.resolve();
-  assert.equal(receivedInput?.cwd, "/Users/dan/Projects/MagicZombie");
-  assert.equal(receivedInput?.codexHome, "/Users/dan/.codex");
+  assert.equal(receivedInput?.cwd, "/srv/projects/sample-project");
+  assert.equal(receivedInput?.codexHome, "/srv/test-user/.codex");
   assert.equal(emitted[0].type, "worker.thread.started");
   assert.equal(emitted[1].type, "worker.progress");
   finish("finished locally");
@@ -97,8 +97,8 @@ test("executor router preserves tenant default and requires explicit remote targ
     (input) => { calls.push(["remote", input.projectId]); return { result: Promise.resolve("remote"), steer() {}, interrupt() {} }; },
   );
   assert.equal(await router.start({ kind: "tenant" }, { jobId: "a", prompt: "x" }).result, "tenant");
-  assert.equal(await router.start({ kind: "remote", projectId: "magic-zombie" }, { jobId: "b", prompt: "y" }).result, "remote");
-  assert.deepEqual(calls, [["tenant", "a"], ["remote", "magic-zombie"]]);
+  assert.equal(await router.start({ kind: "remote", projectId: "sample-project" }, { jobId: "b", prompt: "y" }).result, "remote");
+  assert.deepEqual(calls, [["tenant", "a"], ["remote", "sample-project"]]);
 });
 
 test("remote Codex adapter keeps local HOME and applies project CODEX_HOME", async () => {
@@ -147,12 +147,12 @@ test("cancelled remote runtime suppresses late completion", async () => {
   let interrupted = 0;
   const result = new Promise<string>((resolve) => { finish = resolve; });
   const runtime = new RemoteWorkerRuntime([
-    { id: "magic-zombie", name: "MagicZombie", cwd: "/tmp/magic-zombie" },
+    { id: "sample-project", name: "Sample Project", cwd: "/tmp/sample-project" },
   ], () => ({ result, interrupt: () => { interrupted += 1; } }));
   const emitted: Array<{ type: string }> = [];
   const handling = runtime.handle({
     type: "server.run", protocolVersion: 1, requestId: "run-cancel", jobId: "job-cancel",
-    projectId: "magic-zombie", prompt: "long task",
+    projectId: "sample-project", prompt: "long task",
   }, (message) => emitted.push(message));
   await Promise.resolve();
   await runtime.handle({

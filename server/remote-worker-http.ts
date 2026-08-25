@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import type { Express, Request, Response } from "express";
+import express from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import { RemoteWorkerPollingHub } from "./remote-worker-polling.js";
 
@@ -18,7 +19,11 @@ export type RemoteWorkerHttpService = {
 
 function normalizeMountPath(value: string): string {
   const normalized = `/${value}`.replace(/\/+/g, "/").replace(/\/$/, "");
-  return normalized === "/" ? "/codex-worker" : normalized;
+  const result = normalized === "/" ? "/codex-worker" : normalized;
+  if (result.length > 160 || result.split("/").some((segment) => segment === "." || segment === "..") || !/^\/(?:[A-Za-z0-9._~-]+\/?)+$/.test(result)) {
+    throw new Error("REMOTE_WORKER_PATH is invalid");
+  }
+  return result;
 }
 
 function bearerToken(req: Request): string {
@@ -40,6 +45,7 @@ export function installRemoteWorkerHttpRoutes(
   const mountPath = normalizeMountPath(options.path ?? "/codex-worker");
   const gateway = options.gateway ?? new RemoteWorkerGateway();
   const hub = new RemoteWorkerPollingHub(gateway, { sessionTtlMs: options.sessionTtlMs });
+  const router = express.Router({ strict: true });
   let closed = false;
 
   function available(res: Response): boolean {
@@ -59,29 +65,42 @@ export function installRemoteWorkerHttpRoutes(
     return true;
   }
 
-  app.post(`${mountPath}/register`, (req, res) => {
+  router.use(express.json({ limit: "768kb", strict: true }));
+
+  router.post("/register", (req, res) => {
     if (!available(res) || !authorized(req, res)) return;
     try {
       const registered = hub.register(req.body);
       res.setHeader("Cache-Control", "no-store");
       return res.status(201).json(registered);
     } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : "Unable to register remote worker" });
+      const message = error instanceof Error ? error.message : "Unable to register remote worker";
+      return res.status(/already registered|reconnected/i.test(message) ? 409 : 400).json({ error: message });
     }
   });
 
-  app.get(`${mountPath}/poll/:sessionId`, async (req, res) => {
+  router.get("/poll/:sessionId", async (req, res) => {
     if (!available(res) || !authorized(req, res)) return;
+    const sessionId = String(req.params.sessionId);
+    const cancelPoll = () => {
+      if (!res.writableEnded) hub.cancelPoll(sessionId);
+    };
+    res.once("close", cancelPoll);
     try {
-      const message = await hub.poll(String(req.params.sessionId));
+      const message = await hub.poll(sessionId);
+      if (res.destroyed || res.writableEnded) return;
       res.setHeader("Cache-Control", "no-store");
       return message ? res.json({ message }) : res.status(204).end();
     } catch (error) {
-      return res.status(404).json({ error: error instanceof Error ? error.message : "Remote worker session not found" });
+      if (res.destroyed || res.writableEnded) return;
+      const message = error instanceof Error ? error.message : "Remote worker session not found";
+      return res.status(/active poll/i.test(message) ? 409 : 404).json({ error: message });
+    } finally {
+      res.off("close", cancelPoll);
     }
   });
 
-  app.post(`${mountPath}/message/:sessionId`, (req, res) => {
+  router.post("/message/:sessionId", (req, res) => {
     if (!available(res) || !authorized(req, res)) return;
     try {
       hub.receive(String(req.params.sessionId), req.body);
@@ -92,18 +111,25 @@ export function installRemoteWorkerHttpRoutes(
     }
   });
 
-  app.delete(`${mountPath}/session/:sessionId`, (req, res) => {
+  router.delete("/session/:sessionId", (req, res) => {
     if (!authorized(req, res)) return;
     hub.close(String(req.params.sessionId), "remote worker disconnected cleanly");
     res.setHeader("Cache-Control", "no-store");
     return res.status(204).end();
   });
 
-  app.get(`${mountPath}/status`, (req, res) => {
+  router.get("/status", (req, res) => {
     if (!available(res) || !authorized(req, res)) return;
     res.setHeader("Cache-Control", "no-store");
     return res.json({ workers: gateway.listWorkers() });
   });
+
+  router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    res.setHeader("Cache-Control", "no-store");
+    const status = typeof error === "object" && error && "type" in error && error.type === "entity.too.large" ? 413 : 400;
+    return res.status(status).json({ error: status === 413 ? "Remote worker message exceeds the size limit" : "Invalid remote worker JSON body" });
+  });
+  app.use(mountPath, router);
 
   const sweepTimer = setInterval(() => hub.sweepIdle(), 30_000);
   sweepTimer.unref?.();

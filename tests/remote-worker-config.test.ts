@@ -63,3 +63,31 @@ test("remote worker config rejects missing project directories", () => {
     assert.throws(() => loadRemoteWorkerConfig(file), /does not exist/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("remote worker config rejects embedded credentials and unknown project overrides", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-worker-config-"));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  try {
+    const withToken = writeConfig(root, {
+      serverUrl: "http://localhost:37821/codex-worker",
+      workerId: "dev-pc",
+      displayName: "Development PC",
+      defaultModel: "test-model",
+      defaultReasoningEffort: "medium",
+      token: "a-control-token-must-never-live-in-this-file",
+      projects: [{ id: "project-a", name: "Project A", cwd: project }],
+    });
+    assert.throws(() => loadRemoteWorkerConfig(withToken), /unsupported field/);
+
+    const withProjectOverride = writeConfig(root, {
+      serverUrl: "http://localhost:37821/codex-worker",
+      workerId: "dev-pc",
+      displayName: "Development PC",
+      defaultModel: "test-model",
+      defaultReasoningEffort: "medium",
+      projects: [{ id: "project-a", name: "Project A", cwd: project, shell: "powershell" }],
+    });
+    assert.throws(() => loadRemoteWorkerConfig(withProjectOverride), /unsupported field/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
