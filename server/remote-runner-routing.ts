@@ -5,6 +5,7 @@ import type { AgentSelection } from "./model-options.js";
 import { buildAgentSteerPrompt, buildAgentTurnPrompt } from "./agent-context.js";
 import { latestUserCancellationContext } from "./cancellation-summary.js";
 import { newId } from "./paths.js";
+import { buildRemoteAttachmentPayloads } from "./remote-attachment-payload.js";
 import { sanitizeAgentMarkdown } from "../src/agent-content.js";
 import { RemoteExecutorStore } from "./remote-executor-store.js";
 import { RemoteWorkerGateway, type RemoteRunExecution } from "./remote-worker-gateway.js";
@@ -27,6 +28,7 @@ export type RemoteRunnerRoutingOptions = {
   gateway: RemoteWorkerGateway;
   store: RemoteExecutorStore;
   publish?: Publish;
+  workspaceForConversation?(conversationId: string, userId: string): string;
 };
 
 export type RemoteRunnerRouting = {
@@ -102,9 +104,6 @@ export function installRemoteRunnerRouting(
       const job = db.getJob(jobId);
       const shouldGenerateTitle = conversation.title_source === "default"
         && Boolean(job?.message_id && db.isFirstUserMessage(conversationId, job.message_id));
-      if (uploads.length > 0) {
-        throw new Error("远端项目执行暂不支持会话附件，请先把所需文件放到远端项目目录中");
-      }
       if (!options.gateway.hasProject(target.projectId)) throw new Error(`远端项目当前离线：${target.projectId}`);
 
       const effectivePrompt = buildAgentTurnPrompt({
@@ -112,6 +111,17 @@ export function installRemoteRunnerRouting(
         attachments: [],
         interruptedContext: latestUserCancellationContext(db.listMessages(conversationId)),
       });
+      let attachments = [] as Awaited<ReturnType<typeof buildRemoteAttachmentPayloads>>;
+      if (uploads.length > 0) {
+        if (!options.workspaceForConversation) throw new Error("服务器未配置远端附件工作区解析器");
+        publish(jobId, "status", {
+          status: "running",
+          label: `正在安全打包 ${uploads.length} 个远端附件`,
+          executor: { kind: "remote", projectId: target.projectId },
+        });
+        const workspace = options.workspaceForConversation(conversationId, conversation.user_id);
+        attachments = await buildRemoteAttachmentPayloads(workspace, uploads);
+      }
 
       db.updateJob(jobId, "running");
       db.updateConversation(conversationId, { status: "running" });
@@ -119,6 +129,7 @@ export function installRemoteRunnerRouting(
         status: "running",
         label: `正在远端项目 ${target.projectId} 中处理`,
         executor: { kind: "remote", projectId: target.projectId },
+        attachmentCount: attachments.length,
       });
 
       const execution = options.gateway.start({
@@ -128,6 +139,7 @@ export function installRemoteRunnerRouting(
         ...(conversation.codex_thread_id ? { codexThreadId: conversation.codex_thread_id } : {}),
         model: selection.model,
         reasoningEffort: selection.reasoningEffort,
+        ...(attachments.length > 0 ? { attachments } : {}),
       }, {
         onThreadStarted: (threadId) => db.updateConversation(conversationId, { codexThreadId: threadId }),
         onProgress: (payload) => publish(jobId, "progress", payload),
@@ -159,6 +171,7 @@ export function installRemoteRunnerRouting(
       publish(jobId, "done", {
         status: "completed",
         executor: { kind: "remote", projectId: target.projectId },
+        attachmentCount: attachments.length,
         deliverables: "remote-project",
       });
     } catch (error) {
