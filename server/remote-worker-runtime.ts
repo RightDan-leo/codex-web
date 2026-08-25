@@ -1,3 +1,4 @@
+import { stageRemoteAttachments } from "./remote-attachment-staging.js";
 import {
   REMOTE_WORKER_PROTOCOL_VERSION,
   type ServerToWorkerMessage,
@@ -20,6 +21,8 @@ export type RemoteCodexStartInput = {
   prompt: string;
   model?: string;
   reasoningEffort?: string;
+  runtimeRoot?: string;
+  imagePaths?: string[];
 };
 
 export type RemoteCodexExecution = {
@@ -42,6 +45,7 @@ type ActiveRun = {
   requestId: string;
   execution: RemoteCodexExecution;
   cancelled: boolean;
+  cleanup(): void;
 };
 
 export class RemoteWorkerRuntime {
@@ -108,16 +112,20 @@ export class RemoteWorkerRuntime {
       return;
     }
 
+    let staged: ReturnType<typeof stageRemoteAttachments> | undefined;
     let execution: RemoteCodexExecution;
     try {
+      staged = stageRemoteAttachments(message.jobId, message.prompt, message.attachments);
       execution = this.startCodex({
         jobId: message.jobId,
         cwd: project.cwd,
         ...(project.codexHome ? { codexHome: project.codexHome } : {}),
         ...(message.codexThreadId ? { threadId: message.codexThreadId } : {}),
-        prompt: message.prompt,
+        prompt: staged.prompt,
         ...(message.model ? { model: message.model } : {}),
         ...(message.reasoningEffort ? { reasoningEffort: message.reasoningEffort } : {}),
+        ...(staged.runtimeRoot ? { runtimeRoot: staged.runtimeRoot } : {}),
+        ...(staged.imagePaths.length > 0 ? { imagePaths: staged.imagePaths } : {}),
       }, {
         onThreadStarted: (threadId) => emit({
           type: "worker.thread.started",
@@ -135,6 +143,7 @@ export class RemoteWorkerRuntime {
         }),
       });
     } catch (error) {
+      staged?.cleanup();
       emit({
         type: "worker.error",
         protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
@@ -145,7 +154,12 @@ export class RemoteWorkerRuntime {
       return;
     }
 
-    const active: ActiveRun = { requestId: message.requestId, execution, cancelled: false };
+    const active: ActiveRun = {
+      requestId: message.requestId,
+      execution,
+      cancelled: false,
+      cleanup: staged.cleanup,
+    };
     this.activeRuns.set(message.jobId, active);
     try {
       const result = await execution.result;
@@ -170,6 +184,7 @@ export class RemoteWorkerRuntime {
       }
     } finally {
       if (this.activeRuns.get(message.jobId) === active) this.activeRuns.delete(message.jobId);
+      active.cleanup();
     }
   }
 
