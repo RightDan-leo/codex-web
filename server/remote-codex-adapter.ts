@@ -27,6 +27,13 @@ export type RemoteAppServerStarter = (
   callbacks: RemoteAppServerCallbacks,
 ) => AppServerTurnExecution;
 
+const SAFE_SHELL_ENVIRONMENT_KEYS = new Set([
+  "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+  "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "SHELL",
+  "TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR",
+  "FORCE_COLOR", "CODEX_HOME",
+]);
+
 /**
  * Adapter used by a trusted remote worker. It intentionally keeps the worker
  * process' existing HOME and only overrides CODEX_HOME when the locally
@@ -50,10 +57,11 @@ export function createRemoteCodexStarter(
 
     const controller = new AbortController();
     const env: NodeJS.ProcessEnv = { ...process.env };
+    // The bearer token is only for the worker-to-server control channel. The
+    // Codex app-server and its spawned shell commands must never inherit it.
+    delete env.REMOTE_WORKER_TOKEN;
     if (input.codexHome) env.CODEX_HOME = input.codexHome;
-    const shellEnvironment = Object.fromEntries(
-      Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
+    const shellEnvironment = safeShellEnvironment(env);
 
     const execution = startTurn({
       ...(config.executablePath ? { executablePath: config.executablePath } : {}),
@@ -86,4 +94,13 @@ export function createRemoteCodexStarter(
       },
     };
   };
+}
+
+function safeShellEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== "string" || !SAFE_SHELL_ENVIRONMENT_KEYS.has(key.toUpperCase())) continue;
+    result[key] = value;
+  }
+  return result;
 }
