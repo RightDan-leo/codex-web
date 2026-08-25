@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type { FileRow } from "./db.js";
 import { resolveInside } from "./paths.js";
@@ -57,7 +58,7 @@ export async function buildRemoteAttachmentPayloads(
   return payloads;
 }
 
-async function openRegularFileWithoutSymlinks(absolute: string, displayName: string): Promise<fs.promises.FileHandle> {
+async function openRegularFileWithoutSymlinks(absolute: string, displayName: string): Promise<FileHandle> {
   const linkStat = await fs.promises.lstat(absolute);
   if (linkStat.isSymbolicLink()) throw new Error(`远端附件不能是符号链接：${displayName}`);
   try {
