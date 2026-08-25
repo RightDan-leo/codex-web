@@ -27,12 +27,20 @@ export type StagedRemoteJob = {
   cleanup(): void;
 };
 
+export type RemoteAttachmentPruneOptions = {
+  maxAgeMs?: number;
+  now?: number;
+  /** Test-only override; production callers should leave this unset. */
+  baseRoot?: string;
+};
+
 /** Remove orphaned job directories left by a worker or machine crash. */
 export function pruneStaleRemoteAttachmentRuntimes(
-  maxAgeMs = DEFAULT_STALE_RUNTIME_AGE_MS,
-  now = Date.now(),
+  options: RemoteAttachmentPruneOptions = {},
 ): number {
-  const baseRoot = remoteRuntimeBaseRoot();
+  const baseRoot = options.baseRoot ?? remoteRuntimeBaseRoot();
+  const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? DEFAULT_STALE_RUNTIME_AGE_MS;
   let removed = 0;
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(baseRoot, { withFileTypes: true }); }
