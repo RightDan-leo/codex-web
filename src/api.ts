@@ -1,5 +1,3 @@
-import { assertRemoteAttachmentsSupported } from "./remote-executor-state";
-
 export const BASE_PATH = "/codex-web";
 
 export type Session = { authenticated: boolean; username?: string; displayName?: string; csrfToken?: string; chatFontSize?: number; voiceEnabled?: boolean };
@@ -143,7 +141,6 @@ export const api = {
     { method: "PUT", body: JSON.stringify({ content, quoteExcerpt }), keepalive },
   ),
   uploadConversationDraftFiles: (id: string, files: File[]) => {
-    assertRemoteAttachmentsSupported(id, files.length);
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
     return request<{ composerDraft: ComposerDraft }>(`/conversations/${id}/draft/files`, { method: "POST", body });
@@ -153,7 +150,6 @@ export const api = {
   ),
   deleteConversationDraft: (id: string) => request<void>(`/conversations/${id}/draft`, { method: "DELETE" }),
   sendMessage: (id: string, message: string, files: File[], quoteExcerpt = "", useComposerDraft = false) => {
-    assertRemoteAttachmentsSupported(id, files.length);
     const body = new FormData();
     body.set("message", message);
     body.set("quoteExcerpt", quoteExcerpt);
@@ -180,7 +176,6 @@ export const api = {
     `/conversations/${conversationId}/pending-prompts/${promptId}/restore`, { method: "POST" },
   ),
   updatePendingPrompt: (conversationId: string, promptId: string, message: string, files: File[], removedFileIds: string[], quoteExcerpt = "") => {
-    assertRemoteAttachmentsSupported(conversationId, files.length);
     const body = new FormData();
     body.set("message", message);
     body.set("quoteExcerpt", quoteExcerpt);
