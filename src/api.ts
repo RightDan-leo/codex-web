@@ -113,8 +113,8 @@ export const api = {
   conversations: () => request<{ conversations: Conversation[] }>("/conversations"),
   archivedConversations: (query = "") => request<{ conversations: Conversation[] }>(`/conversations/archived${query ? `?query=${encodeURIComponent(query)}` : ""}`),
   remoteWorkers: () => request<{ workers: RemoteWorkerStatus[] }>("/remote-workers"),
-  conversationExecutor: (id: string) => request<{ executor: ExecutorTarget; online: boolean }>(`/conversations/${id}/executor`),
-  updateConversationExecutor: (id: string, executor: ExecutorTarget) => request<{ executor: ExecutorTarget; online: boolean }>(
+  conversationExecutor: (id: string) => request<{ executor: ExecutorTarget; online: boolean; canChange: boolean }>(`/conversations/${id}/executor`),
+  updateConversationExecutor: (id: string, executor: ExecutorTarget) => request<{ executor: ExecutorTarget; online: boolean; canChange: boolean }>(
     `/conversations/${id}/executor`, { method: "PUT", body: JSON.stringify(executor) },
   ),
   agentOptions: () => request<AgentOptions>("/agent-options"),
