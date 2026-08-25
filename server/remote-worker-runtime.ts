@@ -113,7 +113,7 @@ export class RemoteWorkerRuntime {
     }
 
     let staged: ReturnType<typeof stageRemoteAttachments> | undefined;
-    let execution: RemoteCodexExecution;
+    let execution: RemoteCodexExecution | undefined;
     try {
       staged = stageRemoteAttachments(message.jobId, message.prompt, message.attachments);
       execution = this.startCodex({
@@ -150,6 +150,17 @@ export class RemoteWorkerRuntime {
         requestId: message.requestId,
         jobId: message.jobId,
         message: error instanceof Error ? error.message : "Unable to start remote Codex",
+      });
+      return;
+    }
+    if (!staged || !execution) {
+      staged?.cleanup();
+      emit({
+        type: "worker.error",
+        protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+        requestId: message.requestId,
+        jobId: message.jobId,
+        message: "Remote attachment staging did not initialize",
       });
       return;
     }
