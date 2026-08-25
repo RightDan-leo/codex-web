@@ -28,28 +28,44 @@ export async function buildRemoteAttachmentPayloads(
     const file = uploads[index];
     if (file.kind !== "upload") throw new Error("远端任务只允许传输用户上传的附件");
     const absolute = resolveInside(workspace, file.relative_path);
-    const stat = await fs.promises.stat(absolute);
-    if (!stat.isFile()) throw new Error(`附件不是普通文件：${file.original_name}`);
-    if (stat.size !== file.size) throw new Error(`附件在发送前发生变化：${file.original_name}`);
-    if (stat.size > REMOTE_ATTACHMENT_MAX_BYTES) {
-      throw new Error(`附件超过远端单文件上限（8 MiB）：${file.original_name}`);
-    }
-    totalBytes += stat.size;
-    if (totalBytes > REMOTE_ATTACHMENT_TOTAL_MAX_BYTES) {
-      throw new Error("远端附件总大小超过 16 MiB 上限");
-    }
+    const source = await openRegularFileWithoutSymlinks(absolute, file.original_name);
+    try {
+      const stat = await source.stat();
+      if (!stat.isFile()) throw new Error(`附件不是普通文件：${file.original_name}`);
+      if (stat.size !== file.size) throw new Error(`附件在发送前发生变化：${file.original_name}`);
+      if (stat.size > REMOTE_ATTACHMENT_MAX_BYTES) {
+        throw new Error(`附件超过远端单文件上限（8 MiB）：${file.original_name}`);
+      }
+      totalBytes += stat.size;
+      if (totalBytes > REMOTE_ATTACHMENT_TOTAL_MAX_BYTES) {
+        throw new Error("远端附件总大小超过 16 MiB 上限");
+      }
 
-    const content = await fs.promises.readFile(absolute);
-    if (content.byteLength !== stat.size) throw new Error(`附件读取不完整：${file.original_name}`);
-    payloads.push({
-      name: portableAttachmentName(file.original_name, index),
-      mimeType: normalizedMimeType(file.mime_type),
-      size: content.byteLength,
-      sha256: crypto.createHash("sha256").update(content).digest("hex"),
-      contentBase64: content.toString("base64"),
-    });
+      const content = await source.readFile();
+      if (content.byteLength !== stat.size) throw new Error(`附件读取不完整：${file.original_name}`);
+      payloads.push({
+        name: portableAttachmentName(file.original_name, index),
+        mimeType: normalizedMimeType(file.mime_type),
+        size: content.byteLength,
+        sha256: crypto.createHash("sha256").update(content).digest("hex"),
+        contentBase64: content.toString("base64"),
+      });
+    } finally {
+      await source.close();
+    }
   }
   return payloads;
+}
+
+async function openRegularFileWithoutSymlinks(absolute: string, displayName: string): Promise<fs.promises.FileHandle> {
+  const linkStat = await fs.promises.lstat(absolute);
+  if (linkStat.isSymbolicLink()) throw new Error(`远端附件不能是符号链接：${displayName}`);
+  try {
+    return await fs.promises.open(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`远端附件不能是符号链接：${displayName}`);
+    throw error;
+  }
 }
 
 function portableAttachmentName(value: string, index: number): string {
