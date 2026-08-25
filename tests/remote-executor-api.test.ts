@@ -75,6 +75,7 @@ test("owner API lists connected workers and persists an explicit remote executor
       .send({ kind: "remote", projectId: "api-project" })
       .expect(200);
     assert.deepEqual(updated.body.executor.kind, "remote");
+    assert.equal(updated.body.canChange, true);
     assert.equal(context.store.get(context.conversationId).kind, "remote");
 
     const selected = await request(context.app)
@@ -84,6 +85,7 @@ test("owner API lists connected workers and persists an explicit remote executor
       .expect(200);
     assert.equal(selected.body.executor.projectId, "api-project");
     assert.equal(selected.body.online, true);
+    assert.equal(selected.body.canChange, true);
   } finally {
     context.db.close();
     fs.rmSync(context.root, { recursive: true, force: true });
@@ -100,9 +102,17 @@ test("executor selection is immutable after conversation work begins", async () 
       content: "started",
       created_at: new Date().toISOString(),
     });
+    const cookie = `cww_session=${context.sessionToken}`;
+    const selected = await request(context.app)
+      .get(`/codex-web/api/conversations/${context.conversationId}/executor`)
+      .set("Cookie", cookie)
+      .set("Accept", "application/json")
+      .expect(200);
+    assert.equal(selected.body.canChange, false);
+
     await request(context.app)
       .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
-      .set("Cookie", `cww_session=${context.sessionToken}`)
+      .set("Cookie", cookie)
       .set("X-CSRF-Token", context.csrfToken)
       .send({ kind: "remote", projectId: "api-project" })
       .expect(409);
