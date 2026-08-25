@@ -11,8 +11,9 @@ const empty = {
   draftFileCount: 0,
 };
 
-test("executor remains selectable while only a text draft exists", () => {
+test("executor remains selectable while only a text or attachment draft exists", () => {
   assert.equal(canChangeExecutor(empty), true);
+  assert.equal(canChangeExecutor({ ...empty, draftFileCount: 3 }), true);
 });
 
 test("executor locks after context or queued work begins", () => {
@@ -21,5 +22,4 @@ test("executor locks after context or queued work begins", () => {
   assert.equal(canChangeExecutor({ ...empty, activeJobCount: 1 }), false);
   assert.equal(canChangeExecutor({ ...empty, queuedPromptCount: 1 }), false);
   assert.equal(canChangeExecutor({ ...empty, editingPromptCount: 1 }), false);
-  assert.equal(canChangeExecutor({ ...empty, draftFileCount: 1 }), false);
 });
