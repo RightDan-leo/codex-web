@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type express from "express";
+import type { Express, Request, Response } from "express";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import { RemoteWorkerPollingHub } from "./remote-worker-polling.js";
 
@@ -20,7 +20,7 @@ function normalizeMountPath(value: string): string {
   return normalized === "/" ? "/codex-worker" : normalized;
 }
 
-function bearerToken(req: express.Request): string {
+function bearerToken(req: Request): string {
   const header = req.get("authorization") ?? "";
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
 }
@@ -32,7 +32,7 @@ function sameSecret(expected: string, actual: string): boolean {
 }
 
 export function installRemoteWorkerHttpRoutes(
-  app: express.Express,
+  app: Express,
   options: RemoteWorkerHttpOptions,
 ): RemoteWorkerHttpService {
   if (options.token.length < 32) throw new Error("REMOTE_WORKER_TOKEN must contain at least 32 characters");
@@ -40,7 +40,7 @@ export function installRemoteWorkerHttpRoutes(
   const gateway = new RemoteWorkerGateway();
   const hub = new RemoteWorkerPollingHub(gateway, { sessionTtlMs: options.sessionTtlMs });
 
-  function authorized(req: express.Request, res: express.Response): boolean {
+  function authorized(req: Request, res: Response): boolean {
     const supplied = bearerToken(req);
     if (!supplied || !sameSecret(options.token, supplied)) {
       res.status(401).setHeader("Cache-Control", "no-store");
