@@ -8,6 +8,7 @@ import { RemoteExecutorStore } from "./remote-executor-store.js";
 import { installRemoteRunnerRouting } from "./remote-runner-routing.js";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
+import { ensureTenantWorkspace } from "./paths.js";
 
 const { app, db, config, runner, beginShutdown } = createApp();
 assertProductionConfig(config);
@@ -30,6 +31,7 @@ const remoteExecutorStore = new RemoteExecutorStore(db);
 const remoteRunnerRouting = installRemoteRunnerRouting(runner, db, {
   store: remoteExecutorStore,
   gateway: remoteWorkerGateway,
+  workspaceForConversation: (conversationId, userId) => ensureTenantWorkspace(config.tenantRoot, userId, conversationId),
 });
 installRemoteExecutorApiRoutes(app, db, config, {
   store: remoteExecutorStore,
