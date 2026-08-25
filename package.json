@@ -9,6 +9,8 @@
     "dev": "concurrently -k -n api,web \"tsx watch server/index.ts\" \"vite --host 127.0.0.1 --port 5173\"",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server/index.js",
+    "remote-worker": "node dist-server/server/remote-worker-cli.js",
+    "remote-worker:dev": "tsx server/remote-worker-cli.ts",
     "hash-password": "node scripts/hash-password.mjs",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "lint": "tsc --noEmit"
