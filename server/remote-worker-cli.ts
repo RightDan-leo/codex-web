@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createRemoteCodexStarter } from "./remote-codex-adapter.js";
+import { pruneStaleRemoteAttachmentRuntimes } from "./remote-attachment-staging.js";
 import { loadRemoteWorkerConfig } from "./remote-worker-config.js";
 import {
   REMOTE_WORKER_PROTOCOL_VERSION,
@@ -93,6 +94,8 @@ async function main(): Promise<void> {
   if (token.length < 32) throw new Error("REMOTE_WORKER_TOKEN must contain at least 32 characters");
   const configPath = process.argv[2] || process.env.REMOTE_WORKER_CONFIG || "remote-worker.json";
   const config = loadRemoteWorkerConfig(configPath);
+  const removedRuntimes = pruneStaleRemoteAttachmentRuntimes();
+  if (removedRuntimes > 0) console.log(`Removed ${removedRuntimes} stale remote attachment runtime(s).`);
   const runtime = new RemoteWorkerRuntime(config.projects, createRemoteCodexStarter({
     ...(config.codexExecutablePath ? { executablePath: config.codexExecutablePath } : {}),
     defaultModel: config.defaultModel,
