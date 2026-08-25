@@ -27,7 +27,7 @@ const hello = {
   projects: [{ id: "api-project", name: "API Project" }],
 };
 
-function fixture() {
+function fixture(remoteEnabled = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-remote-api-"));
   const sessionSecret = "remote-api-session-secret-at-least-32-characters";
   const config = loadConfig({
@@ -53,11 +53,11 @@ function fixture() {
   const app = express();
   app.use(cookieParser());
   app.use(express.json());
-  installRemoteExecutorApiRoutes(app, db, config, { gateway, store });
+  installRemoteExecutorApiRoutes(app, db, config, { gateway, store, remoteEnabled });
   return { root, db, app, store, conversationId, sessionToken, csrfToken };
 }
 
-test("owner API lists connected workers and persists an explicit remote executor", async () => {
+test("owner API lists connected workers and permits selection after a text-only draft", async () => {
   const context = fixture();
   try {
     const cookie = `cww_session=${context.sessionToken}`;
@@ -66,7 +66,15 @@ test("owner API lists connected workers and persists an explicit remote executor
       .set("Cookie", cookie)
       .set("Accept", "application/json")
       .expect(200);
+    assert.equal(workers.body.enabled, true);
     assert.equal(workers.body.workers[0].workerId, "api-worker");
+
+    context.db.saveComposerDraft(context.conversationId, "draft text", null);
+    const before = await request(context.app)
+      .get(`/codex-web/api/conversations/${context.conversationId}/executor`)
+      .set("Cookie", cookie)
+      .expect(200);
+    assert.equal(before.body.canChange, true);
 
     const updated = await request(context.app)
       .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
@@ -74,27 +82,26 @@ test("owner API lists connected workers and persists an explicit remote executor
       .set("X-CSRF-Token", context.csrfToken)
       .send({ kind: "remote", projectId: "api-project" })
       .expect(200);
-    assert.deepEqual(updated.body.executor.kind, "remote");
-    assert.equal(updated.body.canChange, true);
+    assert.equal(updated.body.executor.kind, "remote");
+    assert.equal(updated.body.online, true);
     assert.equal(context.store.get(context.conversationId).kind, "remote");
-
-    const selected = await request(context.app)
-      .get(`/codex-web/api/conversations/${context.conversationId}/executor`)
-      .set("Cookie", cookie)
-      .set("Accept", "application/json")
-      .expect(200);
-    assert.equal(selected.body.executor.projectId, "api-project");
-    assert.equal(selected.body.online, true);
-    assert.equal(selected.body.canChange, true);
   } finally {
     context.db.close();
     fs.rmSync(context.root, { recursive: true, force: true });
   }
 });
 
-test("executor selection is immutable after conversation work begins", async () => {
+test("executor selection locks after conversation work begins but a no-op remains readable", async () => {
   const context = fixture();
   try {
+    const cookie = `cww_session=${context.sessionToken}`;
+    await request(context.app)
+      .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
+      .set("Cookie", cookie)
+      .set("X-CSRF-Token", context.csrfToken)
+      .send({ kind: "remote", projectId: "api-project" })
+      .expect(200);
+
     context.db.addMessage({
       id: "00000000-0000-4000-8000-000000000051",
       conversation_id: context.conversationId,
@@ -102,11 +109,10 @@ test("executor selection is immutable after conversation work begins", async () 
       content: "started",
       created_at: new Date().toISOString(),
     });
-    const cookie = `cww_session=${context.sessionToken}`;
+
     const selected = await request(context.app)
       .get(`/codex-web/api/conversations/${context.conversationId}/executor`)
       .set("Cookie", cookie)
-      .set("Accept", "application/json")
       .expect(200);
     assert.equal(selected.body.canChange, false);
 
@@ -114,8 +120,38 @@ test("executor selection is immutable after conversation work begins", async () 
       .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
       .set("Cookie", cookie)
       .set("X-CSRF-Token", context.csrfToken)
-      .send({ kind: "remote", projectId: "api-project" })
+      .send({ kind: "tenant" })
       .expect(409);
+
+    const noOp = await request(context.app)
+      .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
+      .set("Cookie", cookie)
+      .set("X-CSRF-Token", context.csrfToken)
+      .send({ kind: "remote", projectId: "api-project" })
+      .expect(200);
+    assert.equal(noOp.body.canChange, false);
+  } finally {
+    context.db.close();
+    fs.rmSync(context.root, { recursive: true, force: true });
+  }
+});
+
+test("remote selection reports disabled transport instead of treating an in-memory gateway as enabled", async () => {
+  const context = fixture(false);
+  try {
+    const cookie = `cww_session=${context.sessionToken}`;
+    const workers = await request(context.app)
+      .get("/codex-web/api/remote-workers")
+      .set("Cookie", cookie)
+      .expect(200);
+    assert.equal(workers.body.enabled, false);
+
+    await request(context.app)
+      .put(`/codex-web/api/conversations/${context.conversationId}/executor`)
+      .set("Cookie", cookie)
+      .set("X-CSRF-Token", context.csrfToken)
+      .send({ kind: "remote", projectId: "api-project" })
+      .expect(503);
   } finally {
     context.db.close();
     fs.rmSync(context.root, { recursive: true, force: true });

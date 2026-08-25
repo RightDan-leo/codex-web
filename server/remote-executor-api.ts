@@ -4,13 +4,16 @@ import type { AppConfig } from "./config.js";
 import type { AppDatabase, SessionRow } from "./db.js";
 import type { ExecutorTarget } from "./executor-router.js";
 import { RemoteExecutorStore } from "./remote-executor-store.js";
+import { canChangeExecutor } from "./remote-executor-policy.js";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 
 const COOKIE_NAME = "cww_session";
+const SAFE_PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type RemoteExecutorApiOptions = {
   store: RemoteExecutorStore;
   gateway: RemoteWorkerGateway;
+  remoteEnabled: boolean;
 };
 
 /** Install owner-facing executor endpoints without changing the public core API router. */
@@ -26,7 +29,7 @@ export function installRemoteExecutorApiRoutes(
     const session = authenticate(req, res, db, config, true);
     if (!session) return;
     noStore(res);
-    return res.json({ workers: options.gateway.listWorkers() });
+    return res.json({ workers: options.gateway.listWorkers(), enabled: options.remoteEnabled });
   });
 
   app.get(`${apiPath}/conversations/:id/executor`, (req, res) => {
@@ -38,7 +41,7 @@ export function installRemoteExecutorApiRoutes(
     noStore(res);
     return res.json({
       executor,
-      online: executor.kind === "tenant" || options.gateway.hasProject(executor.projectId),
+      online: executor.kind === "tenant" || (options.remoteEnabled && options.gateway.hasProject(executor.projectId)),
       canChange: executorCanChange(db, conversation.id, conversation.codex_thread_id),
     });
   });
@@ -48,21 +51,41 @@ export function installRemoteExecutorApiRoutes(
     if (!session || !verifyWriteRequest(req, res, session)) return;
     const conversation = db.getConversationForUser(String(req.params.id), session.user_id);
     if (!conversation) return res.status(404).json({ error: "会话不存在。" });
-    if (!executorCanChange(db, conversation.id, conversation.codex_thread_id)) {
-      return res.status(409).json({ error: "只能在尚未发送消息、没有草稿或排队任务的新会话中选择执行位置。" });
-    }
 
     let target: ExecutorTarget;
     if (req.body?.kind === "tenant") {
       target = { kind: "tenant" };
     } else if (req.body?.kind === "remote" && typeof req.body?.projectId === "string") {
       const projectId = req.body.projectId.trim();
-      if (!options.gateway.hasProject(projectId)) {
-        return res.status(409).json({ error: "所选远程项目当前不在线。" });
+      if (!SAFE_PROJECT_ID.test(projectId)) {
+        return res.status(400).json({ error: "远端项目标识无效。" });
       }
       target = { kind: "remote", projectId };
     } else {
       return res.status(400).json({ error: "执行位置设置无效。" });
+    }
+
+    const current = options.store.get(conversation.id);
+    if (sameExecutorTarget(current, target)) {
+      noStore(res);
+      return res.json({
+        executor: current,
+        online: current.kind === "tenant" || (options.remoteEnabled && options.gateway.hasProject(current.projectId)),
+        canChange: executorCanChange(db, conversation.id, conversation.codex_thread_id),
+      });
+    }
+
+    if (!executorCanChange(db, conversation.id, conversation.codex_thread_id)) {
+      return res.status(409).json({ error: "执行位置只能在会话首次运行前设置；请新建任务后再选择。" });
+    }
+
+    if (target.kind === "remote") {
+      if (!options.remoteEnabled) {
+        return res.status(503).json({ error: "远端执行服务未启用，请先配置 REMOTE_WORKER_TOKEN。" });
+      }
+      if (!options.gateway.hasProject(target.projectId)) {
+        return res.status(409).json({ error: "所选远端项目当前不在线。" });
+      }
     }
 
     try {
@@ -73,6 +96,11 @@ export function installRemoteExecutorApiRoutes(
       return res.status(400).json({ error: error instanceof Error ? error.message : "执行位置设置无效。" });
     }
   });
+}
+
+function sameExecutorTarget(left: ExecutorTarget, right: ExecutorTarget): boolean {
+  return left.kind === right.kind
+    && (left.kind === "tenant" || (right.kind === "remote" && left.projectId === right.projectId));
 }
 
 function normalizeApiPath(basePath: string): string {
@@ -96,7 +124,7 @@ function authenticate(
     return undefined;
   }
   if (ownerOnly && session.role !== "owner") {
-    res.status(403).json({ error: "只有所有者可以管理远程执行位置。" });
+    res.status(403).json({ error: "只有所有者可以管理远端执行位置。" });
     return undefined;
   }
   return session;
@@ -117,12 +145,18 @@ function verifyWriteRequest(req: Request, res: Response, session: SessionRow): b
   return false;
 }
 
-function executorCanChange(db: AppDatabase, conversationId: string, threadId: string | null): boolean {
-  if (threadId || db.listMessages(conversationId).length > 0) return false;
-  if (db.listActiveJobsForConversation(conversationId).length > 0) return false;
-  if (db.listPendingPrompts(conversationId).length > 0 || db.listPendingPrompts(conversationId, "editing").length > 0) return false;
+export function executorCanChange(db: AppDatabase, conversationId: string, threadId: string | null): boolean {
   const draft = db.getComposerDraft(conversationId);
-  return !draft || (!draft.content && !draft.quote_excerpt && draft.files.length === 0);
+  return canChangeExecutor({
+    hasThread: Boolean(threadId),
+    messageCount: db.listMessages(conversationId).length,
+    activeJobCount: db.listActiveJobsForConversation(conversationId).length,
+    queuedPromptCount: db.listPendingPrompts(conversationId).length,
+    editingPromptCount: db.listPendingPrompts(conversationId, "editing").length,
+    // Text and quote drafts are executor-independent. Attachments are not,
+    // because the first remote transport intentionally does not stage uploads.
+    draftFileCount: draft?.files.length ?? 0,
+  });
 }
 
 function noStore(res: Response): void {

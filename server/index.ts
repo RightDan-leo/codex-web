@@ -34,6 +34,7 @@ const remoteRunnerRouting = installRemoteRunnerRouting(runner, db, {
 installRemoteExecutorApiRoutes(app, db, config, {
   store: remoteExecutorStore,
   gateway: remoteWorkerGateway,
+  remoteEnabled: Boolean(remoteWorkerService),
 });
 
 const server = app.listen(config.port, config.host, () => {
@@ -52,7 +53,6 @@ async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   beginShutdown();
-  remoteRunnerRouting.close();
   logger.info({ signal }, "Codex Web stopping");
   const deadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
   while ((db.runningJobCount() > 0 || runner.activeJobCount > 0) && Date.now() < deadline) {
@@ -63,6 +63,10 @@ async function shutdown(signal: string): Promise<void> {
     logger.error({ remainingJobs, activeExecutions: runner.activeJobCount }, "Shutdown drain timed out");
     process.exit(1);
   }
+  // Once every in-flight job has drained, restore the original runner methods
+  // and then disconnect workers. Doing this before the drain would turn a
+  // graceful container stop into an avoidable remote-task cancellation.
+  remoteRunnerRouting.close();
   remoteWorkerService?.close();
   logger.info("Running jobs drained; closing network services");
   server.close(() => {

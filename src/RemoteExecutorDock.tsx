@@ -1,21 +1,24 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Check, ChevronDown, LoaderCircle, Monitor, Server, WifiOff, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, ChevronDown, HardDrive, LoaderCircle, Monitor, WifiOff } from "lucide-react";
 import { api, type ExecutorTarget, type RemoteWorkerStatus } from "./api";
+import {
+  buildExecutorOptions,
+  executorIsOnline,
+  executorSummary,
+  executorValue,
+  parseExecutorValue,
+} from "./remote-executor";
+import { forgetExecutorTarget, rememberExecutorTarget } from "./remote-executor-state";
 import "./remote-executor.css";
 
 const SELECTED_CONVERSATION_KEY = "codex-web:selected-conversation";
+const SELECTION_POLL_MS = 350;
+const STATUS_POLL_MS = 8_000;
 
-type ExecutorState = {
-  executor: ExecutorTarget;
-  online: boolean;
+type ExecutorSnapshot = {
+  target: ExecutorTarget;
   canChange: boolean;
-};
-
-type ProjectOption = {
-  id: string;
-  name: string;
-  workerId: string;
-  workerName: string;
 };
 
 function selectedConversationId(): string | null {
@@ -23,45 +26,32 @@ function selectedConversationId(): string | null {
   catch { return null; }
 }
 
+function findPortalTarget(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".chat-header-actions");
+}
+
 export function RemoteExecutorDock() {
+  const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(() => findPortalTarget());
   const [conversationId, setConversationId] = useState<string | null>(() => selectedConversationId());
+  const [snapshot, setSnapshot] = useState<ExecutorSnapshot | null>(null);
   const [workers, setWorkers] = useState<RemoteWorkerStatus[]>([]);
-  const [executorState, setExecutorState] = useState<ExecutorState | null>(null);
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
+  const [ownerAccess, setOwnerAccess] = useState<"unknown" | "allowed" | "denied">("unknown");
+  const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [authenticated, setAuthenticated] = useState(true);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const requestGenerationRef = useRef(0);
 
-  const projects = useMemo<ProjectOption[]>(() => workers.flatMap((worker) => worker.projects.map((project) => ({
-    id: project.id,
-    name: project.name,
-    workerId: worker.workerId,
-    workerName: worker.displayName,
-  }))), [workers]);
-
-  const refresh = useCallback(async (id: string, quiet = false) => {
-    if (!quiet) setLoading(true);
-    try {
-      const [workerResult, executorResult] = await Promise.all([
-        api.remoteWorkers(),
-        api.conversationExecutor(id),
-      ]);
-      setAuthenticated(true);
-      setWorkers(workerResult.workers);
-      setExecutorState(executorResult);
-      setError("");
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : "执行位置加载失败";
-      if (/请先登录/.test(message)) {
-        setAuthenticated(false);
-        setOpen(false);
-      } else {
-        setError(message);
-      }
-    } finally {
-      if (!quiet) setLoading(false);
-    }
+  useEffect(() => {
+    const syncTarget = () => {
+      const next = findPortalTarget();
+      setPortalTarget((current) => current === next ? current : next);
+    };
+    syncTarget();
+    const observer = new MutationObserver(syncTarget);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -70,115 +60,201 @@ export function RemoteExecutorDock() {
       setConversationId((current) => current === next ? current : next);
     };
     sync();
-    const timer = window.setInterval(sync, 500);
-    window.addEventListener("storage", sync);
+    const timer = window.setInterval(sync, SELECTION_POLL_MS);
+    window.addEventListener("focus", sync);
+    window.addEventListener("pageshow", sync);
     return () => {
       window.clearInterval(timer);
-      window.removeEventListener("storage", sync);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("pageshow", sync);
     };
+  }, []);
+
+  const refresh = useCallback(async (id: string, showErrors = false) => {
+    const generation = ++requestGenerationRef.current;
+    const [workerResult, executorResult] = await Promise.allSettled([
+      api.remoteWorkers(),
+      api.conversationExecutor(id),
+    ]);
+    if (generation !== requestGenerationRef.current || selectedConversationId() !== id) return;
+
+    if (workerResult.status === "fulfilled") {
+      setOwnerAccess("allowed");
+      setWorkers(workerResult.value.workers);
+      setRemoteEnabled(Boolean(workerResult.value.enabled));
+    } else {
+      const message = workerResult.reason instanceof Error ? workerResult.reason.message : "";
+      if (/只有所有者|403/.test(message)) setOwnerAccess("denied");
+      else if (showErrors) setError(message || "远端电脑状态读取失败");
+    }
+
+    if (executorResult.status === "fulfilled") {
+      const next = {
+        target: executorResult.value.executor,
+        canChange: executorResult.value.canChange,
+      };
+      setSnapshot(next);
+      rememberExecutorTarget(id, next.target);
+    } else if (showErrors) {
+      setError(executorResult.reason instanceof Error ? executorResult.reason.message : "执行位置读取失败");
+    }
   }, []);
 
   useEffect(() => {
     setOpen(false);
-    setExecutorState(null);
     setError("");
+    setSnapshot(null);
     if (!conversationId) return;
-    void refresh(conversationId);
+    void refresh(conversationId, true);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refresh(conversationId, true);
-    }, 10_000);
-    return () => window.clearInterval(timer);
+      if (document.visibilityState === "visible") void refresh(conversationId);
+    }, STATUS_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      requestGenerationRef.current += 1;
+    };
   }, [conversationId, refresh]);
 
-  async function selectExecutor(executor: ExecutorTarget) {
-    if (!conversationId || saving || !executorState?.canChange) return;
-    setSaving(true);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    const remote = Boolean(conversationId && snapshot?.target.kind === "remote");
+    if (remote) {
+      document.documentElement.dataset.executorKind = "remote";
+      document.documentElement.dataset.executorConversation = conversationId!;
+    } else {
+      delete document.documentElement.dataset.executorKind;
+      delete document.documentElement.dataset.executorConversation;
+    }
+    return () => {
+      if (document.documentElement.dataset.executorConversation === conversationId) {
+        delete document.documentElement.dataset.executorKind;
+        delete document.documentElement.dataset.executorConversation;
+      }
+    };
+  }, [conversationId, snapshot?.target]);
+
+  useEffect(() => () => {
+    if (conversationId) forgetExecutorTarget(conversationId);
+  }, [conversationId]);
+
+  const options = useMemo(
+    () => snapshot ? buildExecutorOptions(workers, snapshot.target) : [],
+    [snapshot, workers],
+  );
+  const summary = useMemo(
+    () => snapshot ? executorSummary(snapshot.target, workers) : null,
+    [snapshot, workers],
+  );
+  const online = useMemo(
+    () => snapshot ? executorIsOnline(snapshot.target, workers) && (snapshot.target.kind === "tenant" || remoteEnabled) : false,
+    [remoteEnabled, snapshot, workers],
+  );
+
+  async function choose(value: string) {
+    const id = conversationId;
+    const target = parseExecutorValue(value);
+    if (!id || !target || !snapshot || busy) return;
+    if (executorValue(snapshot.target) === value) { setOpen(false); return; }
+    if (!snapshot.canChange) {
+      setError("执行位置已锁定。请新建任务后选择其他位置。");
+      return;
+    }
+    if (target.kind === "remote" && !remoteEnabled) {
+      setError("远端执行服务尚未启用。");
+      return;
+    }
+    setBusy(true);
     setError("");
     try {
-      const result = await api.updateConversationExecutor(conversationId, executor);
-      setExecutorState(result);
+      const result = await api.updateConversationExecutor(id, target);
+      if (selectedConversationId() !== id) return;
+      setSnapshot({ target: result.executor, canChange: result.canChange });
+      rememberExecutorTarget(id, result.executor);
       setOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "执行位置保存失败");
-      await refresh(conversationId, true).catch(() => undefined);
+      if (selectedConversationId() === id) {
+        setError(reason instanceof Error ? reason.message : "执行位置保存失败");
+      }
     } finally {
-      setSaving(false);
+      if (selectedConversationId() === id) setBusy(false);
     }
   }
 
-  const remoteProjectId = executorState?.executor.kind === "remote"
-    ? executorState.executor.projectId
-    : undefined;
-  const selectedProject = remoteProjectId
-    ? projects.find((project) => project.id === remoteProjectId)
-    : undefined;
-  const hasRemoteChoice = projects.length > 0;
-  const shouldRender = authenticated && Boolean(conversationId) && Boolean(
-    loading || hasRemoteChoice || executorState?.executor.kind === "remote",
-  );
-  if (!shouldRender) return null;
+  if (!portalTarget || !conversationId || !snapshot || ownerAccess !== "allowed" || !summary) return null;
 
-  const selectedLabel = remoteProjectId
-    ? selectedProject?.name ?? remoteProjectId
-    : "隔离工作区";
-  const remoteOffline = executorState?.executor.kind === "remote" && !executorState.online;
+  const selectedValue = executorValue(snapshot.target);
+  const remoteSelected = snapshot.target.kind === "remote";
+  const lockedReason = snapshot.canChange
+    ? ""
+    : "首次任务运行后执行位置会锁定；需要更换时请新建任务。";
 
-  return <aside className={`remote-executor-dock ${open ? "open" : ""}`} aria-label="任务执行位置">
-    {open && <section className="remote-executor-panel">
-      <header>
-        <div><Server size={16} /><span><strong>执行位置</strong><small>仅空白新任务可切换</small></span></div>
-        <button type="button" aria-label="关闭执行位置选择" onClick={() => setOpen(false)}><X size={15} /></button>
-      </header>
-      <div className="remote-executor-options" role="listbox" aria-label="选择任务执行位置">
-        <ExecutorOption
-          icon={<Server size={17} />}
-          title="隔离工作区"
-          description="在服务器 Docker tenant 中执行，默认且最安全"
-          selected={executorState?.executor.kind !== "remote"}
-          disabled={saving || !executorState?.canChange}
-          onClick={() => void selectExecutor({ kind: "tenant" })}
-        />
-        {projects.map((project) => <ExecutorOption
-          key={`${project.workerId}:${project.id}`}
-          icon={<Monitor size={17} />}
-          title={project.name}
-          description={`${project.workerName} · ${project.id}`}
-          selected={executorState?.executor.kind === "remote" && executorState.executor.projectId === project.id}
-          disabled={saving || !executorState?.canChange}
-          onClick={() => void selectExecutor({ kind: "remote", projectId: project.id })}
-        />)}
-      </div>
-      {!hasRemoteChoice && <p className="remote-executor-empty"><WifiOff size={14} />没有在线的远程电脑</p>}
-      {!executorState?.canChange && <p className="remote-executor-note">任务已有消息、草稿或排队内容，执行位置已锁定。</p>}
-      {executorState?.executor.kind === "remote" && <p className="remote-executor-warning">远程任务会直接读写该电脑登记的真实项目目录；当前 MVP 暂不传输会话附件或服务器结果文件。</p>}
-      {error && <p className="remote-executor-error">{error}</p>}
-    </section>}
+  return createPortal(<div ref={rootRef} className={`remote-executor-dock ${remoteSelected ? "remote" : "tenant"} ${online ? "online" : "offline"}`}>
     <button
       type="button"
-      className={`remote-executor-trigger ${remoteOffline ? "offline" : ""}`}
+      className="remote-executor-trigger"
       aria-haspopup="listbox"
       aria-expanded={open}
-      title={remoteOffline ? "远程项目离线" : "选择任务执行位置"}
-      onClick={() => setOpen((value) => !value)}
+      title={lockedReason || `${summary.label} · ${summary.description}`}
+      onClick={() => setOpen((current) => !current)}
     >
-      {loading || saving ? <LoaderCircle className="spin" size={16} /> : remoteOffline ? <WifiOff size={16} /> : executorState?.executor.kind === "remote" ? <Monitor size={16} /> : <Server size={16} />}
-      <span>{remoteOffline ? `${selectedLabel}（离线）` : selectedLabel}</span>
-      <ChevronDown size={14} />
+      <span className="remote-executor-status-dot" aria-hidden="true" />
+      {remoteSelected ? <Monitor size={15} /> : <HardDrive size={15} />}
+      <span className="remote-executor-trigger-copy">
+        <small>执行位置</small>
+        <strong>{summary.label}</strong>
+      </span>
+      {busy ? <LoaderCircle className="spin" size={14} /> : !online && remoteSelected ? <WifiOff size={14} /> : <ChevronDown size={14} />}
     </button>
-  </aside>;
-}
 
-function ExecutorOption({ icon, title, description, selected, disabled, onClick }: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  selected: boolean;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return <button type="button" role="option" aria-selected={selected} disabled={disabled} className={selected ? "selected" : ""} onClick={onClick}>
-    <span className="remote-executor-option-icon">{icon}</span>
-    <span className="remote-executor-option-copy"><strong>{title}</strong><small>{description}</small></span>
-    {selected && <Check size={15} />}
-  </button>;
+    {open && <section className="remote-executor-panel" role="dialog" aria-label="选择执行位置">
+      <header>
+        <div><strong>执行位置</strong><span>仅发送逻辑项目标识，不向服务器公开本机路径</span></div>
+        <span className={`remote-executor-availability ${remoteEnabled ? "enabled" : "disabled"}`}>
+          {remoteEnabled ? `${workers.length} 台电脑在线` : "远端服务未启用"}
+        </span>
+      </header>
+      <div className="remote-executor-options" role="listbox" aria-label="执行位置">
+        {options.map((option) => {
+          const selected = option.value === selectedValue;
+          const unavailable = option.target.kind === "remote" && (!remoteEnabled || !option.online);
+          return <button
+            type="button"
+            role="option"
+            aria-selected={selected}
+            key={option.value}
+            className={`${selected ? "selected" : ""} ${unavailable ? "unavailable" : ""}`}
+            disabled={busy || unavailable || (!snapshot.canChange && !selected)}
+            onClick={() => void choose(option.value)}
+          >
+            <span className="remote-executor-option-icon">{option.target.kind === "tenant" ? <HardDrive size={16} /> : option.online ? <Monitor size={16} /> : <WifiOff size={16} />}</span>
+            <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            {selected && <Check size={15} />}
+          </button>;
+        })}
+      </div>
+      {workers.length === 0 && remoteEnabled && <p className="remote-executor-empty">没有远端电脑在线。启动 Remote Worker 后，已登记的项目会自动出现在这里。</p>}
+      {remoteSelected && <p className={`remote-executor-note ${online ? "" : "warning"}`}>
+        {online
+          ? "任务会直接修改远端项目。网页附件暂不支持远端执行，生成文件保留在项目目录中。"
+          : "当前项目离线。历史仍可查看，新任务会保持失败关闭，不会回退到服务器容器。"}
+      </p>}
+      {!snapshot.canChange && <p className="remote-executor-note locked">{lockedReason}</p>}
+      {error && <p className="remote-executor-error" role="alert">{error}</p>}
+    </section>}
+  </div>, portalTarget);
 }

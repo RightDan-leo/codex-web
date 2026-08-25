@@ -14,6 +14,8 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 8. Shell commands started by the remote Codex process receive only an allowlisted environment, not arbitrary worker-process secrets.
 9. Non-local worker connections require HTTPS.
 10. A persisted remote conversation fails closed when its worker is offline; it never silently falls back to the tenant workspace.
+11. Browser attachments are blocked client-side for a known remote executor and are rejected again by the remote runner until explicit staging is implemented.
+12. Graceful server shutdown stops new dispatch first and keeps the worker channel alive until active local and remote jobs have drained.
 
 ## Implemented in this slice
 
@@ -27,9 +29,10 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 - Persistent per-conversation executor target stored in SQLite.
 - Routing of run, thread resume, progress, steering, cancellation, shutdown draining, and completion through the selected executor.
 - Owner-authenticated worker status and executor-selection API with CSRF and origin checks.
-- Web selector for choosing the isolated tenant or an online remote project on a blank new task.
-- Offline status in the web selector for a previously selected remote project.
-- Unit and integration coverage for routing, path isolation, polling lifecycle, HTTP authentication, config validation, cancellation, steering, fail-closed behavior, executor selection, and secret isolation.
+- Header-integrated web selector for choosing the isolated tenant or an online remote project on a blank task.
+- Explicit enabled/disabled transport state and offline status for a previously selected remote project.
+- Text-only drafts remain selectable before the first run; draft attachments lock the executor because the MVP does not stage them remotely.
+- Unit and integration coverage for routing, path isolation, polling lifecycle, HTTP authentication, config validation, cancellation, steering, fail-closed behavior, executor selection, UI option mapping, attachment guards, and secret isolation.
 
 The transport is intentionally behind an interface. A future WSS transport can replace long polling without changing the executor, gateway, or local runtime layers.
 
@@ -86,17 +89,17 @@ The worker actively registers and polls the server. It never accepts a server-su
 
 1. Start the server and at least one trusted worker.
 2. In Codex Web, click **New task** so the blank conversation is selected.
-3. Use the execution-position control above the composer.
+3. Open **Execution location** in the conversation header.
 4. Keep **Isolated workspace** for the existing Docker tenant, or select an online remote project.
 5. Send the first prompt. The selection is then locked for that conversation.
 
-The selector is deliberately immutable after the conversation has a message, Codex thread, draft attachment, queued prompt, or active job. This avoids continuing one thread against two unrelated filesystems.
+Text and quote drafts do not lock the selector. A Codex thread, sent message, draft attachment, queued prompt, editing prompt, or active job does. This avoids continuing one thread against two unrelated filesystems while still allowing the user to choose a project after drafting the first instruction.
 
 A remote project can go offline after selection. The UI marks it offline, and new work for that conversation fails clearly until the same logical project id reconnects.
 
 ## Current MVP limits
 
-- Conversation attachments are not staged to a remote worker. Put required files inside the registered project directory before sending the task.
+- Conversation attachments are not staged to a remote worker. The web client disables normal attachment upload for a known remote executor, but required files should still be placed inside the registered project directory before sending the task.
 - Files generated inside a remote project remain on that computer. They are not yet copied into Codex Web's durable deliverable store.
 - Sending directly from the initial welcome screen still creates and submits a tenant conversation immediately. Create a blank task first when remote execution is required.
 - The management transport currently uses authenticated outbound long polling rather than WSS.
@@ -104,6 +107,6 @@ A remote project can go offline after selection. The UI marks it offline, and ne
 
 ## Validation status
 
-The remote runner, owner executor API, secret-isolation adapter, and web selector have dedicated tests or strict TypeScript harnesses in this branch. Before merging, run the repository's full `npm test` and Docker build on a machine with normal package and container access, then perform one end-to-end Windows or macOS worker run against a disposable project.
+The remote runner, owner executor API, secret-isolation adapter, selector helpers, attachment guard, and web selector have dedicated tests or strict TypeScript harnesses in this branch. Before merging, run the repository's full `npm test` and Docker build on a machine with normal package and container access, then perform one end-to-end Windows or macOS worker run against a disposable project.
 
 This branch intentionally remains a Draft PR until those full-project and end-to-end checks pass. The next integration slice should add explicit attachment staging, result synchronization with size and path limits, worker enrollment/rotation, and deployment tests on both Windows and macOS.
