@@ -23,13 +23,14 @@ export async function buildRemoteAttachmentPayloads(
     throw new Error(`远端任务最多支持 ${REMOTE_ATTACHMENT_MAX_FILES} 个附件`);
   }
 
+  const workspaceReal = await fs.promises.realpath(workspace);
   const payloads: RemoteAttachmentPayload[] = [];
   let totalBytes = 0;
   for (let index = 0; index < uploads.length; index += 1) {
     const file = uploads[index];
     if (file.kind !== "upload") throw new Error("远端任务只允许传输用户上传的附件");
     const absolute = resolveInside(workspace, file.relative_path);
-    const source = await openRegularFileWithoutSymlinks(absolute, file.original_name);
+    const source = await openRegularFileWithoutSymlinks(workspaceReal, absolute, file.original_name);
     try {
       const stat = await source.stat();
       if (!stat.isFile()) throw new Error(`附件不是普通文件：${file.original_name}`);
@@ -58,7 +59,13 @@ export async function buildRemoteAttachmentPayloads(
   return payloads;
 }
 
-async function openRegularFileWithoutSymlinks(absolute: string, displayName: string): Promise<FileHandle> {
+async function openRegularFileWithoutSymlinks(
+  workspaceReal: string,
+  absolute: string,
+  displayName: string,
+): Promise<FileHandle> {
+  const parentReal = await fs.promises.realpath(path.dirname(absolute));
+  if (!isInside(workspaceReal, parentReal)) throw new Error(`远端附件路径经过会话目录外的符号链接：${displayName}`);
   const linkStat = await fs.promises.lstat(absolute);
   if (linkStat.isSymbolicLink()) throw new Error(`远端附件不能是符号链接：${displayName}`);
   try {
@@ -67,6 +74,12 @@ async function openRegularFileWithoutSymlinks(absolute: string, displayName: str
     if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`远端附件不能是符号链接：${displayName}`);
     throw error;
   }
+}
+
+function isInside(root: string, candidate: string): boolean {
+  const normalizedRoot = path.resolve(root);
+  const normalizedCandidate = path.resolve(candidate);
+  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}${path.sep}`);
 }
 
 function portableAttachmentName(value: string, index: number): string {
