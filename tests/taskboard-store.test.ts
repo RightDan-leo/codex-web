@@ -232,3 +232,20 @@ test("a late result from an older job cannot settle a restarted task", (t) => {
   db.finishJob(second.job.id, second.conversationId, "completed");
   assert.equal(store.settleTaskForJob(second.job.id)?.status, "review");
 });
+
+test("startup repairs legacy running cards from their real job state", (t) => {
+  const { db, store } = setup(t);
+  const project = store.createProject(LEGACY_USER_ID, { name: "Legacy", description: "", executor: { kind: "tenant" } });
+  const notStarted = createTask(store, project.id, "Never started");
+  db.sqlite.prepare("UPDATE taskboard_tasks SET status='running' WHERE id=?").run(notStarted.id);
+  const readyStore = new TaskboardStore(db);
+  assert.equal(readyStore.getTask(notStarted.id, LEGACY_USER_ID)?.status, "ready");
+
+  const queuedTask = createTask(store, project.id, "Queued before migration");
+  const ready = store.transitionTask(queuedTask.id, LEGACY_USER_ID, queuedTask.version, "ready");
+  const started = store.startTask(queuedTask.id, LEGACY_USER_ID, ready.version, { model: "gpt-test", reasoningEffort: "high" });
+  db.sqlite.prepare("UPDATE taskboard_tasks SET active_job_id=NULL WHERE id=?").run(queuedTask.id);
+  const reboundStore = new TaskboardStore(db);
+  assert.equal(reboundStore.getTask(queuedTask.id, LEGACY_USER_ID)?.status, "running");
+  assert.equal(reboundStore.getTask(queuedTask.id, LEGACY_USER_ID)?.active_job_id, started.job.id);
+});

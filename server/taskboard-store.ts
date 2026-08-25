@@ -116,6 +116,7 @@ type UpdateTaskInput = {
 
 export class TaskboardStore {
   constructor(private readonly db: AppDatabase) {
+    this.reconcileLegacyRunningTasks();
     this.reconcileTerminalExecutions();
   }
 
@@ -640,6 +641,46 @@ export class TaskboardStore {
       WHERE task.status='running' AND job.status IN ('completed','failed','cancelled','interrupted')
     `).all() as Array<{ id: string }>;
     for (const job of jobs) this.settleTaskForJob(job.id);
+  }
+
+  private reconcileLegacyRunningTasks(): void {
+    const tasks = this.db.sqlite.prepare(`
+      SELECT task.*,project.user_id AS owner_user_id FROM taskboard_tasks task
+      JOIN taskboard_projects project ON project.id=task.project_id
+      WHERE task.status='running' AND task.active_job_id IS NULL AND task.archived_at IS NULL
+    `).all() as Array<TaskboardTaskRow & { owner_user_id: string }>;
+    for (const task of tasks) {
+      const job = task.conversation_id ? this.db.sqlite.prepare(`
+        SELECT id,status FROM jobs WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 1
+      `).get(task.conversation_id) as { id: string; status: JobRow["status"] } | undefined : undefined;
+      const status: TaskboardStatus = job?.status === "completed"
+        ? "review"
+        : job && ["failed", "cancelled", "interrupted"].includes(job.status)
+          ? "blocked"
+          : job && ["queued", "running"].includes(job.status)
+            ? "running"
+            : "ready";
+      const activeJobId = job && ["queued", "running"].includes(job.status) ? job.id : null;
+      const now = new Date().toISOString();
+      const position = this.nextPosition(task.project_id, status);
+      this.db.sqlite.exec("BEGIN IMMEDIATE");
+      try {
+        const updated = this.db.sqlite.prepare(`
+          UPDATE taskboard_tasks SET status=?,active_job_id=?,position=?,version=version+1,updated_at=?
+          WHERE id=? AND version=? AND status='running' AND active_job_id IS NULL
+        `).run(status, activeJobId, position, now, task.id, task.version);
+        if (updated.changes === 1) {
+          this.appendEvent(task.project_id, task.id, task.owner_user_id, "task.legacy_execution_reconciled", {
+            jobId: job?.id ?? null, jobStatus: job?.status ?? null, taskStatus: status,
+          }, now);
+          this.db.sqlite.prepare("UPDATE taskboard_projects SET version=version+1,updated_at=? WHERE id=?").run(now, task.project_id);
+        }
+        this.db.sqlite.exec("COMMIT");
+      } catch (error) {
+        this.db.sqlite.exec("ROLLBACK");
+        throw error;
+      }
+    }
   }
 }
 
