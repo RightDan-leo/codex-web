@@ -425,6 +425,10 @@ test("the owner tenant has a dedicated Unix identity and workers reject cross-te
   assert.match(appServerSource, /this\.request\("thread\/resume", \{ threadId: this\.options\.threadId, \.\.\.common, excludeTurns: true \}\)/);
   assert.match(appServerSource, /this\.request\("thread\/start", common\)/);
   assert.match(composeSource, /codex-runtime:\/opt\/codex-runtime/);
+  assert.match(composeSource, /\.\/app\.env:\/app\/\.env:ro/);
+  assert.match(composeSource, /- CHOWN/);
+  assert.match(composeSource, /- FOWNER/);
+  assert.match(composeSource, /- DAC_READ_SEARCH/);
 });
 
 test("conversation workspaces stay concise while tenants receive the managed local spreadsheet skill", (context) => {
