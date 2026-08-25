@@ -103,11 +103,7 @@ export function installRemoteWorkerHttpRoutes(
     hub,
     close: () => {
       clearInterval(sweepTimer);
-      for (const worker of gateway.listWorkers()) {
-        const sessionId = (hub as unknown as { sessionByWorker?: Map<string, string> }).sessionByWorker?.get(worker.workerId);
-        if (sessionId) hub.close(sessionId, "Codex Web is shutting down");
-        else gateway.detach(worker.workerId, "Codex Web is shutting down");
-      }
+      for (const worker of gateway.listWorkers()) gateway.detach(worker.workerId, "Codex Web is shutting down");
     },
   };
 }
