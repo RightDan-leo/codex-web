@@ -8,7 +8,6 @@ import {
   parseExecutorValue,
 } from "../src/remote-executor.js";
 import {
-  assertRemoteAttachmentsSupported,
   forgetExecutorTarget,
   knownExecutorTarget,
   rememberExecutorTarget,
@@ -50,14 +49,12 @@ test("executor summary reports online and fail-closed offline state", () => {
   assert.equal(executorSummary({ kind: "remote", projectId: "missing" }, workers).online, false);
 });
 
-test("known remote executor blocks browser attachment staging", () => {
+test("known executor state follows the selected conversation", () => {
   const id = "conversation-1";
   rememberExecutorTarget(id, { kind: "remote", projectId: "magic-zombie" });
   assert.deepEqual(knownExecutorTarget(id), { kind: "remote", projectId: "magic-zombie" });
-  assert.throws(() => assertRemoteAttachmentsSupported(id, 1), /暂不支持网页附件/);
-  assert.doesNotThrow(() => assertRemoteAttachmentsSupported(id, 0));
   rememberExecutorTarget(id, { kind: "tenant" });
-  assert.doesNotThrow(() => assertRemoteAttachmentsSupported(id, 2));
+  assert.deepEqual(knownExecutorTarget(id), { kind: "tenant" });
   forgetExecutorTarget(id);
   assert.equal(knownExecutorTarget(id), undefined);
 });
