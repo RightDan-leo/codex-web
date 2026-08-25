@@ -1,0 +1,223 @@
+export const REMOTE_WORKER_PROTOCOL_VERSION = 1 as const;
+
+export type RemoteWorkerPlatform = "linux" | "darwin" | "win32";
+
+export type RemoteWorkerProjectDescriptor = {
+  id: string;
+  name: string;
+};
+
+export type RemoteWorkerCapabilities = {
+  platform: RemoteWorkerPlatform;
+  arch: string;
+  codexVersion?: string;
+  supportsSteering: boolean;
+  supportsInterrupt: boolean;
+};
+
+export type WorkerHelloMessage = {
+  type: "worker.hello";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  workerId: string;
+  displayName: string;
+  capabilities: RemoteWorkerCapabilities;
+  projects: RemoteWorkerProjectDescriptor[];
+};
+
+export type ServerRunMessage = {
+  type: "server.run";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  projectId: string;
+  prompt: string;
+  codexThreadId?: string;
+  model?: string;
+  reasoningEffort?: string;
+};
+
+export type ServerSteerMessage = {
+  type: "server.steer";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  prompt: string;
+};
+
+export type ServerCancelMessage = {
+  type: "server.cancel";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+};
+
+export type ServerPingMessage = {
+  type: "server.ping";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+};
+
+export type ServerToWorkerMessage = ServerRunMessage | ServerSteerMessage | ServerCancelMessage | ServerPingMessage;
+
+export type WorkerReadyMessage = {
+  type: "worker.ready";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  workerId: string;
+};
+
+export type WorkerThreadStartedMessage = {
+  type: "worker.thread.started";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  threadId: string;
+};
+
+export type WorkerProgressMessage = {
+  type: "worker.progress";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  payload: unknown;
+};
+
+export type WorkerResultMessage = {
+  type: "worker.result";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  result: string;
+};
+
+export type WorkerErrorMessage = {
+  type: "worker.error";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId?: string;
+  message: string;
+};
+
+export type WorkerCancelledMessage = {
+  type: "worker.cancelled";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+};
+
+export type WorkerPongMessage = {
+  type: "worker.pong";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+};
+
+export type WorkerToServerMessage =
+  | WorkerReadyMessage
+  | WorkerThreadStartedMessage
+  | WorkerProgressMessage
+  | WorkerResultMessage
+  | WorkerErrorMessage
+  | WorkerCancelledMessage
+  | WorkerPongMessage;
+
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isSafeId(value: unknown): value is string {
+  return typeof value === "string" && SAFE_ID.test(value);
+}
+
+function hasCurrentVersion(value: Record<string, unknown>): boolean {
+  return value.protocolVersion === REMOTE_WORKER_PROTOCOL_VERSION;
+}
+
+export function validateWorkerHello(value: unknown): WorkerHelloMessage {
+  if (!isObject(value) || value.type !== "worker.hello" || !hasCurrentVersion(value)) {
+    throw new Error("Invalid remote worker hello message");
+  }
+  if (!isSafeId(value.workerId) || typeof value.displayName !== "string" || !value.displayName.trim()) {
+    throw new Error("Invalid remote worker identity");
+  }
+  if (!isObject(value.capabilities)) throw new Error("Invalid remote worker capabilities");
+  const platform = value.capabilities.platform;
+  if (!(["linux", "darwin", "win32"] as unknown[]).includes(platform)) throw new Error("Invalid remote worker platform");
+  if (typeof value.capabilities.arch !== "string" || !value.capabilities.arch) throw new Error("Invalid remote worker architecture");
+  if (typeof value.capabilities.supportsSteering !== "boolean" || typeof value.capabilities.supportsInterrupt !== "boolean") {
+    throw new Error("Invalid remote worker capability flags");
+  }
+  if (value.capabilities.codexVersion !== undefined && typeof value.capabilities.codexVersion !== "string") {
+    throw new Error("Invalid remote worker Codex version");
+  }
+  if (!Array.isArray(value.projects) || value.projects.length > 128) throw new Error("Invalid remote worker project list");
+  const seen = new Set<string>();
+  for (const project of value.projects) {
+    if (!isObject(project) || !isSafeId(project.id) || typeof project.name !== "string" || !project.name.trim()) {
+      throw new Error("Invalid remote worker project");
+    }
+    if (seen.has(project.id)) throw new Error("Duplicate remote worker project id");
+    seen.add(project.id);
+  }
+  return value as WorkerHelloMessage;
+}
+
+export function validateServerMessage(value: unknown): ServerToWorkerMessage {
+  if (!isObject(value) || !hasCurrentVersion(value) || typeof value.type !== "string") {
+    throw new Error("Invalid remote worker server message");
+  }
+  if (!isSafeId(value.requestId)) throw new Error("Invalid remote worker request id");
+  switch (value.type) {
+    case "server.run":
+      if (!isSafeId(value.jobId) || !isSafeId(value.projectId) || typeof value.prompt !== "string" || !value.prompt.trim()) {
+        throw new Error("Invalid remote run request");
+      }
+      if (value.codexThreadId !== undefined && !isSafeId(value.codexThreadId)) throw new Error("Invalid remote Codex thread id");
+      if (value.model !== undefined && typeof value.model !== "string") throw new Error("Invalid remote model");
+      if (value.reasoningEffort !== undefined && typeof value.reasoningEffort !== "string") throw new Error("Invalid reasoning effort");
+      return value as ServerRunMessage;
+    case "server.steer":
+      if (!isSafeId(value.jobId) || typeof value.prompt !== "string" || !value.prompt.trim()) throw new Error("Invalid remote steer request");
+      return value as ServerSteerMessage;
+    case "server.cancel":
+      if (!isSafeId(value.jobId)) throw new Error("Invalid remote cancel request");
+      return value as ServerCancelMessage;
+    case "server.ping":
+      return value as ServerPingMessage;
+    default:
+      throw new Error("Unknown remote worker server message");
+  }
+}
+
+export function validateWorkerMessage(value: unknown): WorkerToServerMessage {
+  if (!isObject(value) || !hasCurrentVersion(value) || typeof value.type !== "string") {
+    throw new Error("Invalid remote worker message");
+  }
+  if (value.type === "worker.ready") {
+    if (!isSafeId(value.workerId)) throw new Error("Invalid ready worker id");
+    return value as WorkerReadyMessage;
+  }
+  if (!isSafeId(value.requestId)) throw new Error("Invalid remote worker request id");
+  switch (value.type) {
+    case "worker.thread.started":
+      if (!isSafeId(value.jobId) || !isSafeId(value.threadId)) throw new Error("Invalid remote thread event");
+      return value as WorkerThreadStartedMessage;
+    case "worker.progress":
+      if (!isSafeId(value.jobId)) throw new Error("Invalid remote progress event");
+      return value as WorkerProgressMessage;
+    case "worker.result":
+      if (!isSafeId(value.jobId) || typeof value.result !== "string") throw new Error("Invalid remote result event");
+      return value as WorkerResultMessage;
+    case "worker.error":
+      if (value.jobId !== undefined && !isSafeId(value.jobId)) throw new Error("Invalid remote error job id");
+      if (typeof value.message !== "string" || !value.message) throw new Error("Invalid remote error event");
+      return value as WorkerErrorMessage;
+    case "worker.cancelled":
+      if (!isSafeId(value.jobId)) throw new Error("Invalid remote cancellation event");
+      return value as WorkerCancelledMessage;
+    case "worker.pong":
+      return value as WorkerPongMessage;
+    default:
+      throw new Error("Unknown remote worker message");
+  }
+}
