@@ -20,6 +20,12 @@ const hello = {
   projects: [{ id: "project-routing", name: "Routing Project" }],
 };
 
+type TestConversation = {
+  id: string;
+  title_source: "default";
+  codex_thread_id: string | null;
+};
+
 function fixture() {
   const sent: Array<{ type: string; requestId: string; jobId?: string; prompt?: string }> = [];
   const gateway = new RemoteWorkerGateway();
@@ -31,7 +37,7 @@ function fixture() {
   const events: Array<{ type: string; payload: unknown }> = [];
   const messages: Array<{ content: string }> = [];
   const finishes: Array<{ status: string; error?: string | null }> = [];
-  const conversations = new Map([
+  const conversations = new Map<string, TestConversation>([
     ["conversation-routing", {
       id: "conversation-routing",
       title_source: "default",
