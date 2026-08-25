@@ -41,6 +41,7 @@ export type WorkerEmit = (message: WorkerToServerMessage) => void;
 type ActiveRun = {
   requestId: string;
   execution: RemoteCodexExecution;
+  cancelled: boolean;
 };
 
 export class RemoteWorkerRuntime {
@@ -133,26 +134,31 @@ export class RemoteWorkerRuntime {
       return;
     }
 
-    this.activeRuns.set(message.jobId, { requestId: message.requestId, execution });
+    const active: ActiveRun = { requestId: message.requestId, execution, cancelled: false };
+    this.activeRuns.set(message.jobId, active);
     try {
       const result = await execution.result;
-      emit({
-        type: "worker.result",
-        protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
-        requestId: message.requestId,
-        jobId: message.jobId,
-        result,
-      });
+      if (!active.cancelled) {
+        emit({
+          type: "worker.result",
+          protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+          requestId: message.requestId,
+          jobId: message.jobId,
+          result,
+        });
+      }
     } catch (error) {
-      emit({
-        type: "worker.error",
-        protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
-        requestId: message.requestId,
-        jobId: message.jobId,
-        message: error instanceof Error ? error.message : "Remote Codex failed",
-      });
+      if (!active.cancelled) {
+        emit({
+          type: "worker.error",
+          protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+          requestId: message.requestId,
+          jobId: message.jobId,
+          message: error instanceof Error ? error.message : "Remote Codex failed",
+        });
+      }
     } finally {
-      this.activeRuns.delete(message.jobId);
+      if (this.activeRuns.get(message.jobId) === active) this.activeRuns.delete(message.jobId);
     }
   }
 
@@ -184,6 +190,7 @@ export class RemoteWorkerRuntime {
   private cancel(jobId: string, requestId: string, emit: WorkerEmit): void {
     const active = this.activeRuns.get(jobId);
     if (!active) return;
+    active.cancelled = true;
     active.execution.interrupt?.();
     emit({
       type: "worker.cancelled",
@@ -191,6 +198,5 @@ export class RemoteWorkerRuntime {
       requestId: active.requestId,
       jobId,
     });
-    this.activeRuns.delete(jobId);
   }
 }
