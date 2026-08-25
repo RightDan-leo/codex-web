@@ -4,6 +4,7 @@ dist-server/
 .env
 .env.*
 !.env.example
+remote-worker.json
 data/
 tenants/
 workspaces/
