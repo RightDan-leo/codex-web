@@ -460,6 +460,7 @@ function TaskDetailDialog({ task, detail, busy, online, onClose, onSave, onSaveD
       </div>
       {["done", "cancelled"].includes(task.status) && <button type="button" className="taskboard-archive-task" disabled={busy} onClick={() => onArchive(task)}><Archive size={15} />归档任务</button>}
       {task.status === "review" && <p className="taskboard-review-note"><ShieldCheck size={15} />只有你点击“验收通过”后，这张任务卡才会完成。</p>}
+      {task.status === "blocked" && task.executionMessage && <p className="taskboard-blocked-note"><TriangleAlert size={15} />{task.executionMessage}</p>}
       {!online && <p className="taskboard-offline-note"><TriangleAlert size={15} />远端项目离线；任务保持原执行位置，不会回退到 Tenant。</p>}
     </section>
   </div>;

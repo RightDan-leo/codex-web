@@ -75,6 +75,7 @@ export type TaskboardTask = {
   createdAt: string;
   updatedAt: string;
   executionStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | null;
+  executionMessage: string | null;
   jobId: string | null;
   allowedTransitions: TaskboardStatus[];
 };

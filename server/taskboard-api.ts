@@ -1,6 +1,5 @@
 import type { Router, Response } from "express";
-import type { SessionRow } from "./db.js";
-import type { StoredAgentSelection } from "./db.js";
+import type { JobStatus, SessionRow, StoredAgentSelection } from "./db.js";
 import type { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import {
   TaskboardConflictError,
@@ -191,7 +190,7 @@ export function installTaskboardApiRoutes(
     if (!session) return;
     try {
       const task = store.archiveTask(String(req.params.id), session.user_id, readVersion(req.body?.version));
-      return res.json({ task: { ...serializeTask(task), executionStatus: null, jobId: null, allowedTransitions: [] } });
+      return res.json({ task: { ...serializeTask(task), executionStatus: null, executionMessage: null, jobId: null, allowedTransitions: [] } });
     } catch (error) {
       return sendTaskboardError(res, error);
     }
@@ -353,9 +352,29 @@ function serializeTaskWithState(store: TaskboardStore, task: TaskboardTaskRow, u
   return {
     ...serializeTask(task),
     executionStatus: execution?.status ?? null,
+    executionMessage: safeExecutionMessage(execution?.status ?? null, execution?.error ?? null),
     jobId: execution?.jobId ?? null,
     allowedTransitions: transitionTargets(task.status),
   };
+}
+
+export function safeExecutionMessage(status: JobStatus | null, error: string | null): string | null {
+  if (status === "completed" || status === null) return null;
+  if (status === "queued") return "任务已进入持久队列，正在等待执行。";
+  if (status === "running") return "Codex 正在执行这项任务。";
+  if (status === "cancelled") return "上次执行已由用户取消；移至待开发后可以重新启动。";
+  if (status === "interrupted") return "上次执行被服务中断；确认执行器在线后可以重试。";
+  const detail = (error ?? "").toLowerCase();
+  if (/spawn|eperm|eacces|permission denied|access is denied/.test(detail)) {
+    return "本机 Codex 运行程序无法启动；请检查 CODEX_RUNTIME_PATH 和 Windows 执行权限。";
+  }
+  if (/not logged in|unauthorized|authentication|login required|sign in/.test(detail)) {
+    return "当前执行器尚未登录 Codex；完成该执行器的登录后再重试。";
+  }
+  if (/remote worker|remote project/.test(detail) && /offline|unavailable|disconnect|not found/.test(detail)) {
+    return "Remote Worker 或目标项目已离线；恢复连接后再重试，任务不会回退到 Tenant。";
+  }
+  return "上次 Codex 执行失败；请打开工作会话查看详情，处理后移至待开发重试。";
 }
 
 function parsePayload(payload: string): unknown {

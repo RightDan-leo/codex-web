@@ -68,6 +68,7 @@ export type TaskboardEventRow = {
 export type TaskboardExecution = {
   jobId: string;
   status: JobRow["status"];
+  error: string | null;
 };
 
 export type StartedTaskboardTask = {
@@ -229,10 +230,10 @@ export class TaskboardStore {
     const task = this.requireTask(id, userId, true);
     if (!task.conversation_id) return null;
     const job = this.db.sqlite.prepare(`
-      SELECT id,status FROM jobs WHERE conversation_id=?
+      SELECT id,status,error FROM jobs WHERE conversation_id=?
       ORDER BY id=? DESC,created_at DESC,id DESC LIMIT 1
-    `).get(task.conversation_id, task.active_job_id ?? "") as { id: string; status: JobRow["status"] } | undefined;
-    return job ? { jobId: job.id, status: job.status } : null;
+    `).get(task.conversation_id, task.active_job_id ?? "") as { id: string; status: JobRow["status"]; error: string | null } | undefined;
+    return job ? { jobId: job.id, status: job.status, error: job.error } : null;
   }
 
   createTask(projectId: string, userId: string, input: CreateTaskInput): TaskboardTaskRow {

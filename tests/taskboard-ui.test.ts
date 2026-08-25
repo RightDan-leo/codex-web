@@ -24,6 +24,7 @@ const task: TaskboardTask = {
   createdAt: "2026-08-25T00:00:00.000Z",
   updatedAt: "2026-08-25T00:00:00.000Z",
   executionStatus: null,
+  executionMessage: null,
   jobId: null,
   allowedTransitions: ["ready", "done", "cancelled"],
 };
@@ -62,5 +63,6 @@ test("taskboard is rendered inside the main React app and hides the chat compose
   assert.match(styles, /@media \(max-width: 720px\)/);
   assert.match(pageSource, /startTaskboardTask/);
   assert.match(pageSource, /立即启动开发/);
+  assert.match(pageSource, /taskboard-blocked-note/);
   assert.match(serverAppSource, /taskboardStore\.settleTaskForJob\(jobId\)/);
 });

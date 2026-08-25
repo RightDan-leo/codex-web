@@ -7,6 +7,7 @@ import test from "node:test";
 import bcrypt from "bcryptjs";
 import request from "supertest";
 import { createApp } from "../server/app.js";
+import { safeExecutionMessage } from "../server/taskboard-api.js";
 
 function setup(t: test.TestContext, queueAutoStart = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-taskboard-api-"));
@@ -38,6 +39,18 @@ function setup(t: test.TestContext, queueAutoStart = false) {
   });
   return instance;
 }
+
+test("taskboard execution messages classify failures without exposing raw details", () => {
+  assert.equal(
+    safeExecutionMessage("failed", "spawn EPERM at D:\\private\\project; token=secret"),
+    "本机 Codex 运行程序无法启动；请检查 CODEX_RUNTIME_PATH 和 Windows 执行权限。",
+  );
+  assert.equal(
+    safeExecutionMessage("failed", "Not logged in: C:\\Users\\owner\\.codex"),
+    "当前执行器尚未登录 Codex；完成该执行器的登录后再重试。",
+  );
+  assert.doesNotMatch(safeExecutionMessage("failed", "unexpected token=secret")!, /secret|token=/i);
+});
 
 test("taskboard API enforces login, owner role, CSRF and origin", async (t) => {
   const instance = setup(t);
