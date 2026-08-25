@@ -56,6 +56,17 @@ export class RemoteWorkerRuntime {
     }
   }
 
+  get activeRunCount(): number {
+    return this.activeRuns.size;
+  }
+
+  shutdown(): void {
+    for (const active of this.activeRuns.values()) {
+      active.cancelled = true;
+      active.execution.interrupt?.();
+    }
+  }
+
   async handle(rawMessage: unknown, emit: WorkerEmit): Promise<void> {
     const message: ServerToWorkerMessage = validateServerMessage(rawMessage);
     switch (message.type) {
