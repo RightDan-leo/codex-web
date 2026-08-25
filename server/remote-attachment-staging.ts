@@ -9,6 +9,9 @@ import {
   type RemoteAttachmentPayload,
 } from "./remote-worker-protocol.js";
 
+const REMOTE_RUNTIME_DIRECTORY = "codex-web-remote-worker";
+const DEFAULT_STALE_RUNTIME_AGE_MS = 24 * 60 * 60 * 1000;
+
 export type StagedRemoteAttachment = {
   name: string;
   mimeType: string;
@@ -23,6 +26,35 @@ export type StagedRemoteJob = {
   attachments: StagedRemoteAttachment[];
   cleanup(): void;
 };
+
+/** Remove orphaned job directories left by a worker or machine crash. */
+export function pruneStaleRemoteAttachmentRuntimes(
+  maxAgeMs = DEFAULT_STALE_RUNTIME_AGE_MS,
+  now = Date.now(),
+): number {
+  const baseRoot = remoteRuntimeBaseRoot();
+  let removed = 0;
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(baseRoot, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+  const deadline = now - Math.max(60_000, maxAgeMs);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const absolute = path.join(baseRoot, entry.name);
+    try {
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink() || stat.mtimeMs > deadline) continue;
+      fs.rmSync(absolute, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // A concurrently finishing job may disappear between listing and stat.
+    }
+  }
+  return removed;
+}
 
 /**
  * Materialize bounded wire attachments in a worker-owned temporary directory.
@@ -39,7 +71,7 @@ export function stageRemoteAttachments(
   }
   if (attachments.length > REMOTE_ATTACHMENT_MAX_FILES) throw new Error("Too many remote attachments");
 
-  const baseRoot = path.join(os.tmpdir(), "codex-web-remote-worker");
+  const baseRoot = remoteRuntimeBaseRoot();
   fs.mkdirSync(baseRoot, { recursive: true, mode: 0o700 });
   const safeJobId = jobId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "job";
   const runtimeRoot = fs.mkdtempSync(path.join(baseRoot, `${safeJobId}-`));
@@ -95,6 +127,10 @@ export function stageRemoteAttachments(
     cleanup();
     throw error;
   }
+}
+
+function remoteRuntimeBaseRoot(): string {
+  return path.join(os.tmpdir(), REMOTE_RUNTIME_DIRECTORY);
 }
 
 function safeFileName(value: string, index: number): string {
