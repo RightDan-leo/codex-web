@@ -2,13 +2,13 @@
   "serverUrl": "https://example.com/codex-worker",
   "workerId": "my-development-pc",
   "displayName": "My Development PC",
-  "defaultModel": "YOUR_CODEX_MODEL",
-  "defaultReasoningEffort": "medium",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultReasoningEffort": "xhigh",
   "projects": [
     {
-      "id": "magic-zombie",
-      "name": "MagicZombie",
-      "cwd": "D:\\MagicZombie",
+      "id": "sample-project",
+      "name": "Sample Project",
+      "cwd": "D:\\Projects\\sample-project",
       "codexHome": "C:\\Users\\your-name\\.codex"
     }
   ]

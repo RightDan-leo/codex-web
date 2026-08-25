@@ -72,13 +72,13 @@ flowchart TB
     subgraph extension["PP Agent administrator extension"]
         router["Project + executor router"]
         hostBridge["Trusted local host bridge"]
-        gateway["Remote Worker WSS gateway"]
+        gateway["Remote Worker polling gateway"]
     end
 
     admin -. "project mode" .-> router
     router --> hostBridge --> hostCodex["Server-side Codex"]
     router --> gateway
-    remoteWorker["Remote Worker"] -. "opens authenticated WSS" .-> gateway
+    remoteWorker["Remote Worker"] -. "authenticated outbound polling" .-> gateway
     gateway -->|"structured requests"| remoteWorker
     remoteWorker --> appServer["Local codex app-server"]
     appServer <--> remoteState[("Remote project<br/>and user Codex Home")]
@@ -91,7 +91,7 @@ The important boundary is the executor, not the browser account alone. A restric
 
 ### Remote computer execution
 
-A Remote Worker does not expose an inbound shell, RDP endpoint, or generic tunnel. It initiates an application-level WSS connection to the server, advertises its runtime capabilities, and executes only requests addressed to a registered project. Codex runs under the interactive user on that computer, with the real project directory as `cwd` and that user's normal Codex Home, so web-started and desktop-started threads share the same local Codex history.
+A Remote Worker does not expose an inbound shell, RDP endpoint, or generic tunnel. The current MVP initiates authenticated outbound long polling to the server, advertises its runtime capabilities, and executes only requests addressed to a registered project. Codex runs under the interactive user on that computer, with the real project directory as `cwd` and that user's normal Codex Home. The server stores the returned Codex thread ID so later turns in the same web conversation can resume it.
 
 ```mermaid
 sequenceDiagram
@@ -103,7 +103,7 @@ sequenceDiagram
     participant C as Local codex app-server
     participant P as Remote project + Codex Home
 
-    W->>G: Establish outbound authenticated WSS
+    W->>G: Register, then open authenticated long polls
     A->>API: Open project and submit a task
     API->>API: Persist prompt and queue state
     API->>G: Dispatch to selected executor
@@ -114,16 +114,9 @@ sequenceDiagram
     W-->>G: Forward structured events
     G-->>API: Persist events, messages, and thread ID
     API-->>A: Live journal over SSE
-    A->>API: Refresh tasks created by the desktop app
-    API->>G: Request thread/list and thread/read
-    G->>W: Read matching cwd threads
-    W->>C: List and read matching threads
-    C-->>W: Return thread, turn, and item data
-    W-->>G: Return paged thread updates
-    G-->>API: Merge idempotently, newest first
 ```
 
-Remote synchronization is deliberately explicit rather than pretending to be a distributed filesystem. Thread, turn, and item identifiers make imports idempotent; offline machines keep their project history visible, while new work waits until the executor is available. An archived project is hidden without deleting its tasks and stops receiving explicit synchronization until the same executor and folder are added again.
+The MVP does not import arbitrary desktop-created threads or synchronize a filesystem. Remote-generated files remain on that computer; only progress, the thread ID, and the final text response return to Codex Web. An offline selected project fails closed instead of running the task in a tenant workspace.
 
 ### Durable task lifecycle
 

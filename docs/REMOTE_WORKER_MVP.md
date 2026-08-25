@@ -20,6 +20,8 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 14. Only that disposable directory is added as an extra Codex sandbox root; supported image files are passed as local-image inputs.
 15. Staged attachments are removed after success, failure, or cancellation. Crash leftovers older than 24 hours are removed when the worker starts again.
 16. Graceful server shutdown stops new dispatch first and keeps the worker channel alive until active local and remote jobs have drained.
+17. Worker messages are strict and bounded: unknown fields (including `cwd`), oversized prompts, progress, results, and errors are rejected; each run also has a finite progress-event budget.
+18. Cancellation is final on the server before the best-effort cancel message is sent; late results and messages from replaced sessions are ignored or rejected.
 
 ## Implemented in this slice
 
@@ -35,7 +37,7 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 - Owner-authenticated worker status and executor-selection API with CSRF and origin checks.
 - Header-integrated web selector for choosing the isolated tenant or an online remote project on a blank task.
 - Explicit enabled/disabled transport state and offline status for a previously selected remote project.
-- Draft text, quotes, and uploaded draft files remain executor-neutral until the first message, thread, job, or queued/editing prompt locks the conversation.
+- Executor selection locks as soon as a draft (text, quote, or attachment) is saved, or when any message, thread, job, queued prompt, or editing prompt exists.
 - Bounded browser-attachment transfer, digest verification, disposable worker staging, image forwarding, normal cleanup, and stale-runtime cleanup.
 - Compatibility negotiation: an older connected worker without attachment support fails explicitly instead of silently dropping files.
 - Unit and integration coverage for routing, path isolation, polling lifecycle, HTTP authentication, config validation, cancellation, steering, fail-closed behavior, executor selection, UI option mapping, secret isolation, attachment limits, path escape, symlinks, digest tampering, sandbox roots, and cleanup.
@@ -65,13 +67,15 @@ npm run build
 cp remote-worker.example.json remote-worker.json
 ```
 
+The worker verifies `codex --version` before registering and currently requires Codex CLI 0.144.1 or newer. The container build pins 0.144.1 to match this repository's locked Codex SDK baseline.
+
 Edit `remote-worker.json`. `serverUrl` is the final HTTPS worker endpoint, for example `https://example.com/codex-worker`. Each project maps a stable logical id to a real local directory:
 
 ```json
 {
-  "id": "magic-zombie",
-  "name": "MagicZombie",
-  "cwd": "D:\\MagicZombie",
+  "id": "sample-project",
+  "name": "Sample Project",
+  "cwd": "D:\\Projects\\sample-project",
   "codexHome": "C:\\Users\\your-name\\.codex"
 }
 ```
@@ -97,9 +101,9 @@ The worker actively registers and polls the server. It never accepts a server-su
 2. In Codex Web, click **New task** so the blank conversation is selected.
 3. Open **Execution location** in the conversation header.
 4. Keep **Isolated workspace** for the existing Docker tenant, or select an online remote project.
-5. Draft text and attach files as needed, then send the first prompt. The selection is locked when conversation work begins.
+5. After selecting the executor, draft text and attach files as needed, then send the first prompt.
 
-Draft text, quotes, and draft attachments do not lock the selector. A Codex thread, sent message, queued prompt, editing prompt, or active job does. This avoids continuing one thread against two unrelated filesystems while still allowing project selection after preparing the first instruction and its files.
+The selector locks as soon as any draft text, quote, or draft attachment is saved. A Codex thread, sent message, queued prompt, editing prompt, or active job also locks it. Select the execution location before composing or attaching files; this prevents one persisted task context from being resumed against two unrelated filesystems.
 
 A remote project can go offline after selection. The UI marks it offline, and new work for that conversation fails clearly until the same logical project id reconnects.
 
@@ -125,8 +129,8 @@ A remote project can go offline after selection. The UI marks it offline, and ne
 
 ## Validation status
 
-The remote runner, owner executor API, secret-isolation adapter, selector helpers, attachment packaging/staging, protocol negotiation, sandbox roots, symlink rejection, digest verification, normal cleanup, and stale-runtime cleanup have dedicated tests or strict TypeScript harnesses in this branch.
+The remote runner, owner executor API, secret-isolation adapter, selector helpers, attachment packaging/staging, protocol negotiation and size limits, sandbox roots, symlink rejection, digest verification, normal cleanup, stale-runtime cleanup, reconnect rejection, acknowledgement timeout, and late-result suppression have dedicated tests or strict TypeScript harnesses in this branch.
 
-The fork still reports no GitHub Actions workflow run or commit status for this PR. Before merging, run the repository's full `npm test` and Docker build on a machine with normal package and container access, then perform one end-to-end Windows or macOS worker run against a disposable project with both a text file and an image attachment.
+On 2026-08-25 the Windows audit environment passed `npm run lint`, `npm run build`, and the full `npm test` suite (132 tests: 131 passed and one privileged Windows symlink case skipped). A disposable Git project also passed the in-process polling/runtime mock flow for run, progress, thread resume, steering, cancellation, and late-result suppression. The standard `npm ci` remained blocked while fetching the lockfile-pinned optional Windows Codex binary; `npm ci --omit=optional` completed. Docker was not installed, so container config/build and a real isolated Codex app-server worker run remain unverified here.
 
-This branch intentionally remains a Draft PR until those full-project and end-to-end checks pass. The next integration slice should add result-file synchronization with explicit path/size limits, worker enrollment and token rotation, optional WSS transport, and deployment tests on both Windows and macOS.
+This branch intentionally remains a Draft PR until a clean standard install, Docker build, and real isolated Windows or macOS Codex worker run pass. The next integration slice should add result-file synchronization with explicit path/size limits, worker enrollment and token rotation, optional WSS transport, and deployment tests on both Windows and macOS.
