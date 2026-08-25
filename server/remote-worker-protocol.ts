@@ -81,6 +81,14 @@ export type WorkerProgressMessage = {
   payload: unknown;
 };
 
+export type WorkerSteeredMessage = {
+  type: "worker.steered";
+  protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
+  requestId: string;
+  jobId: string;
+  turnId?: string;
+};
+
 export type WorkerResultMessage = {
   type: "worker.result";
   protocolVersion: typeof REMOTE_WORKER_PROTOCOL_VERSION;
@@ -114,6 +122,7 @@ export type WorkerToServerMessage =
   | WorkerReadyMessage
   | WorkerThreadStartedMessage
   | WorkerProgressMessage
+  | WorkerSteeredMessage
   | WorkerResultMessage
   | WorkerErrorMessage
   | WorkerCancelledMessage
@@ -205,6 +214,10 @@ export function validateWorkerMessage(value: unknown): WorkerToServerMessage {
     case "worker.progress":
       if (!isSafeId(value.jobId)) throw new Error("Invalid remote progress event");
       return value as WorkerProgressMessage;
+    case "worker.steered":
+      if (!isSafeId(value.jobId)) throw new Error("Invalid remote steer acknowledgement");
+      if (value.turnId !== undefined && !isSafeId(value.turnId)) throw new Error("Invalid remote steered turn id");
+      return value as WorkerSteeredMessage;
     case "worker.result":
       if (!isSafeId(value.jobId) || typeof value.result !== "string") throw new Error("Invalid remote result event");
       return value as WorkerResultMessage;
