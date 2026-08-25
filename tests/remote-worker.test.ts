@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { ExecutorRouter } from "../server/executor-router.js";
+import { createRemoteCodexStarter } from "../server/remote-codex-adapter.js";
 import { RemoteWorkerGateway } from "../server/remote-worker-gateway.js";
 import { RemoteWorkerRuntime } from "../server/remote-worker-runtime.js";
 
@@ -95,4 +99,68 @@ test("executor router preserves tenant default and requires explicit remote targ
   assert.equal(await router.start({ kind: "tenant" }, { jobId: "a", prompt: "x" }).result, "tenant");
   assert.equal(await router.start({ kind: "remote", projectId: "magic-zombie" }, { jobId: "b", prompt: "y" }).result, "remote");
   assert.deepEqual(calls, [["tenant", "a"], ["remote", "magic-zombie"]]);
+});
+
+test("remote Codex adapter keeps local HOME and applies project CODEX_HOME", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-remote-project-"));
+  const codexHome = path.join(root, ".codex");
+  fs.mkdirSync(codexHome);
+  let captured: { cwd: string; env: NodeJS.ProcessEnv; model: string; reasoningEffort: string; library: string; runtimeWorkspaceRoots?: string[] } | undefined;
+  let interrupted = false;
+  try {
+    const starter = createRemoteCodexStarter({
+      defaultModel: "test-model",
+      defaultReasoningEffort: "medium",
+      networkAccessEnabled: false,
+    }, (options, callbacks) => {
+      captured = options;
+      callbacks.onThreadStarted("thread-adapter");
+      return {
+        result: Promise.resolve("adapter-ok"),
+        steer: async () => "turn-steered",
+        interrupt: () => { interrupted = true; },
+      };
+    });
+    let threadId = "";
+    const execution = starter({ jobId: "job-adapter", cwd: root, codexHome, prompt: "edit project" }, {
+      onThreadStarted: (value) => { threadId = value; },
+      onProgress: () => {},
+    });
+    assert.equal(await execution.result, "adapter-ok");
+    assert.equal(threadId, "thread-adapter");
+    assert.equal(captured?.cwd, root);
+    assert.equal(captured?.env.CODEX_HOME, codexHome);
+    assert.equal(captured?.env.HOME, process.env.HOME);
+    assert.equal(captured?.model, "test-model");
+    assert.equal(captured?.reasoningEffort, "medium");
+    assert.equal(captured?.library, root);
+    assert.deepEqual(captured?.runtimeWorkspaceRoots, [root]);
+    execution.interrupt?.();
+    assert.equal(interrupted, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancelled remote runtime suppresses late completion", async () => {
+  let finish!: (value: string) => void;
+  let interrupted = 0;
+  const result = new Promise<string>((resolve) => { finish = resolve; });
+  const runtime = new RemoteWorkerRuntime([
+    { id: "magic-zombie", name: "MagicZombie", cwd: "/tmp/magic-zombie" },
+  ], () => ({ result, interrupt: () => { interrupted += 1; } }));
+  const emitted: Array<{ type: string }> = [];
+  const handling = runtime.handle({
+    type: "server.run", protocolVersion: 1, requestId: "run-cancel", jobId: "job-cancel",
+    projectId: "magic-zombie", prompt: "long task",
+  }, (message) => emitted.push(message));
+  await Promise.resolve();
+  await runtime.handle({
+    type: "server.cancel", protocolVersion: 1, requestId: "cancel-request", jobId: "job-cancel",
+  }, (message) => emitted.push(message));
+  finish("late result");
+  await handling;
+  assert.equal(interrupted, 1);
+  assert.equal(emitted.some((message) => message.type === "worker.cancelled"), true);
+  assert.equal(emitted.some((message) => message.type === "worker.result"), false);
 });
