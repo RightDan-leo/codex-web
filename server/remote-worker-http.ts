@@ -39,6 +39,14 @@ export function installRemoteWorkerHttpRoutes(
   const mountPath = normalizeMountPath(options.path ?? "/codex-worker");
   const gateway = new RemoteWorkerGateway();
   const hub = new RemoteWorkerPollingHub(gateway, { sessionTtlMs: options.sessionTtlMs });
+  let closed = false;
+
+  function available(res: Response): boolean {
+    if (!closed) return true;
+    res.status(503).setHeader("Cache-Control", "no-store");
+    res.json({ error: "Remote worker service is shutting down" });
+    return false;
+  }
 
   function authorized(req: Request, res: Response): boolean {
     const supplied = bearerToken(req);
@@ -51,7 +59,7 @@ export function installRemoteWorkerHttpRoutes(
   }
 
   app.post(`${mountPath}/register`, (req, res) => {
-    if (!authorized(req, res)) return;
+    if (!available(res) || !authorized(req, res)) return;
     try {
       const registered = hub.register(req.body);
       res.setHeader("Cache-Control", "no-store");
@@ -62,7 +70,7 @@ export function installRemoteWorkerHttpRoutes(
   });
 
   app.get(`${mountPath}/poll/:sessionId`, async (req, res) => {
-    if (!authorized(req, res)) return;
+    if (!available(res) || !authorized(req, res)) return;
     try {
       const message = await hub.poll(String(req.params.sessionId));
       res.setHeader("Cache-Control", "no-store");
@@ -73,7 +81,7 @@ export function installRemoteWorkerHttpRoutes(
   });
 
   app.post(`${mountPath}/message/:sessionId`, (req, res) => {
-    if (!authorized(req, res)) return;
+    if (!available(res) || !authorized(req, res)) return;
     try {
       hub.receive(String(req.params.sessionId), req.body);
       res.setHeader("Cache-Control", "no-store");
@@ -91,7 +99,7 @@ export function installRemoteWorkerHttpRoutes(
   });
 
   app.get(`${mountPath}/status`, (req, res) => {
-    if (!authorized(req, res)) return;
+    if (!available(res) || !authorized(req, res)) return;
     res.setHeader("Cache-Control", "no-store");
     return res.json({ workers: gateway.listWorkers() });
   });
@@ -102,8 +110,10 @@ export function installRemoteWorkerHttpRoutes(
     gateway,
     hub,
     close: () => {
+      if (closed) return;
+      closed = true;
       clearInterval(sweepTimer);
-      for (const worker of gateway.listWorkers()) gateway.detach(worker.workerId, "Codex Web is shutting down");
+      hub.closeAll("Codex Web is shutting down");
     },
   };
 }
