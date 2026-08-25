@@ -250,7 +250,7 @@ export function RemoteExecutorDock() {
       {workers.length === 0 && remoteEnabled && <p className="remote-executor-empty">没有远端电脑在线。启动 Remote Worker 后，已登记的项目会自动出现在这里。</p>}
       {remoteSelected && <p className={`remote-executor-note ${online ? "" : "warning"}`}>
         {online
-          ? "任务会直接修改远端项目。网页附件暂不支持远端执行，生成文件保留在项目目录中。"
+          ? "网页附件会经受认证的 Worker 通道复制到一次性目录（单文件 8 MiB、合计 16 MiB），任务结束后自动清理；生成文件仍保留在项目目录中。"
           : "当前项目离线。历史仍可查看，新任务会保持失败关闭，不会回退到服务器容器。"}
       </p>}
       {!snapshot.canChange && <p className="remote-executor-note locked">{lockedReason}</p>}
