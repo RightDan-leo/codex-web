@@ -153,8 +153,8 @@ export function executorCanChange(db: AppDatabase, conversationId: string, threa
     activeJobCount: db.listActiveJobsForConversation(conversationId).length,
     queuedPromptCount: db.listPendingPrompts(conversationId).length,
     editingPromptCount: db.listPendingPrompts(conversationId, "editing").length,
-    // Text and quote drafts are executor-independent. Attachments are not,
-    // because the first remote transport intentionally does not stage uploads.
+    // Draft uploads are executor-neutral and are staged only when a remote job
+    // is dispatched. The count remains in the policy state for compatibility.
     draftFileCount: draft?.files.length ?? 0,
   });
 }
