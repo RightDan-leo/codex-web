@@ -1,5 +1,9 @@
 export const REMOTE_WORKER_PROTOCOL_VERSION = 1 as const;
 
+export const REMOTE_ATTACHMENT_MAX_FILES = 12;
+export const REMOTE_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
+export const REMOTE_ATTACHMENT_TOTAL_MAX_BYTES = 16 * 1024 * 1024;
+
 export type RemoteWorkerPlatform = "linux" | "darwin" | "win32";
 
 export type RemoteWorkerProjectDescriptor = {
@@ -13,6 +17,16 @@ export type RemoteWorkerCapabilities = {
   codexVersion?: string;
   supportsSteering: boolean;
   supportsInterrupt: boolean;
+  /** Optional for compatibility with workers built before attachment staging. */
+  supportsAttachments?: boolean;
+};
+
+export type RemoteAttachmentPayload = {
+  name: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
+  contentBase64: string;
 };
 
 export type WorkerHelloMessage = {
@@ -34,6 +48,7 @@ export type ServerRunMessage = {
   codexThreadId?: string;
   model?: string;
   reasoningEffort?: string;
+  attachments?: RemoteAttachmentPayload[];
 };
 
 export type ServerSteerMessage = {
@@ -129,6 +144,8 @@ export type WorkerToServerMessage =
   | WorkerPongMessage;
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/i;
+const STRICT_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -140,6 +157,36 @@ function isSafeId(value: unknown): value is string {
 
 function hasCurrentVersion(value: Record<string, unknown>): boolean {
   return value.protocolVersion === REMOTE_WORKER_PROTOCOL_VERSION;
+}
+
+function validateAttachments(value: unknown): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > REMOTE_ATTACHMENT_MAX_FILES) {
+    throw new Error("Invalid remote attachment list");
+  }
+  let totalBytes = 0;
+  for (const attachment of value) {
+    if (!isObject(attachment)) throw new Error("Invalid remote attachment");
+    if (typeof attachment.name !== "string" || !attachment.name.trim() || attachment.name.length > 180 || /[\u0000\r\n]/.test(attachment.name)) {
+      throw new Error("Invalid remote attachment name");
+    }
+    if (typeof attachment.mimeType !== "string" || !attachment.mimeType.trim() || attachment.mimeType.length > 255) {
+      throw new Error("Invalid remote attachment MIME type");
+    }
+    if (!Number.isSafeInteger(attachment.size) || Number(attachment.size) < 0 || Number(attachment.size) > REMOTE_ATTACHMENT_MAX_BYTES) {
+      throw new Error("Remote attachment exceeds the per-file limit");
+    }
+    if (typeof attachment.sha256 !== "string" || !SHA256_HEX.test(attachment.sha256)) {
+      throw new Error("Invalid remote attachment digest");
+    }
+    if (typeof attachment.contentBase64 !== "string" || !STRICT_BASE64.test(attachment.contentBase64)) {
+      throw new Error("Invalid remote attachment encoding");
+    }
+    const decodedBytes = Buffer.byteLength(attachment.contentBase64, "base64");
+    if (decodedBytes !== attachment.size) throw new Error("Remote attachment size does not match its payload");
+    totalBytes += decodedBytes;
+    if (totalBytes > REMOTE_ATTACHMENT_TOTAL_MAX_BYTES) throw new Error("Remote attachments exceed the total size limit");
+  }
 }
 
 export function validateWorkerHello(value: unknown): WorkerHelloMessage {
@@ -155,6 +202,9 @@ export function validateWorkerHello(value: unknown): WorkerHelloMessage {
   if (typeof value.capabilities.arch !== "string" || !value.capabilities.arch) throw new Error("Invalid remote worker architecture");
   if (typeof value.capabilities.supportsSteering !== "boolean" || typeof value.capabilities.supportsInterrupt !== "boolean") {
     throw new Error("Invalid remote worker capability flags");
+  }
+  if (value.capabilities.supportsAttachments !== undefined && typeof value.capabilities.supportsAttachments !== "boolean") {
+    throw new Error("Invalid remote worker attachment capability");
   }
   if (value.capabilities.codexVersion !== undefined && typeof value.capabilities.codexVersion !== "string") {
     throw new Error("Invalid remote worker Codex version");
@@ -184,6 +234,7 @@ export function validateServerMessage(value: unknown): ServerToWorkerMessage {
       if (value.codexThreadId !== undefined && !isSafeId(value.codexThreadId)) throw new Error("Invalid remote Codex thread id");
       if (value.model !== undefined && typeof value.model !== "string") throw new Error("Invalid remote model");
       if (value.reasoningEffort !== undefined && typeof value.reasoningEffort !== "string") throw new Error("Invalid reasoning effort");
+      validateAttachments(value.attachments);
       return value as ServerRunMessage;
     case "server.steer":
       if (!isSafeId(value.jobId) || typeof value.prompt !== "string" || !value.prompt.trim()) throw new Error("Invalid remote steer request");
