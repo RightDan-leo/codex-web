@@ -192,7 +192,7 @@ test("selected message text can be quoted into a focused Agent question", () => 
 test("pending queue stays translucent and vertically compact in both themes", () => {
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
   const styles = fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8");
-  assert.match(appSource, /className=\{`workspace \$\{currentDetail\?\.pendingPrompts\.length \? "has-pending-queue" : ""\}`\}/);
+  assert.match(appSource, /className=\{`workspace \$\{workspaceView === "chat" && currentDetail\?\.pendingPrompts\.length \? "has-pending-queue" : ""\}`\}/);
   assert.match(styles, /\.pending-queue \{[^}]*background: rgba\(255, 255, 255, \.72\);[^}]*backdrop-filter: blur\(10px\)/);
   assert.match(styles, /\.pending-queue-heading \{[^}]*min-height: 26px;[^}]*padding: 4px 9px 3px;/);
   assert.match(styles, /\.pending-queue-list \{[^}]*max-height: 174px;[^}]*overflow-y: auto;[^}]*overscroll-behavior-y: contain;[^}]*touch-action: pan-y;/);

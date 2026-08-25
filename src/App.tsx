@@ -4,7 +4,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Archive, ArrowUp, Bot, Check, ChevronDown, CircleDashed, Download, File as FileIcon, FileImage, FileText, FolderOpen,
-  CornerUpLeft, GripVertical, LoaderCircle, LogOut, Menu, Mic, Minus, Monitor, Moon, MoreHorizontal, Paperclip, Pencil, Plus, Search, Settings2, Square, Sun,
+  CornerUpLeft, GripVertical, LayoutGrid, LoaderCircle, LogOut, Menu, Mic, Minus, Monitor, Moon, MoreHorizontal, Paperclip, Pencil, Plus, Search, Settings2, Square, Sun,
   RotateCcw, Trash2, TriangleAlert, X, Zap,
 } from "lucide-react";
 import { api, BASE_PATH, fileUrl, setCsrf, type AgentOptions, type ComposerDraft, type Conversation, type ConversationDetail, type Job, type JobEvent, type PendingPrompt, type ReasoningEffort, type Session, type WorkFile } from "./api";
@@ -21,6 +21,7 @@ import { mergeMessagePages, preservePrependedScrollTop } from "./message-history
 import { resolveScrollFollow } from "./scroll-follow";
 import { buildProcessJournal, isNarrativeActivity } from "./process-journal";
 import { formatRolloutBytes, shouldWarnAboutRollout } from "./rollout-capacity";
+import { TaskboardPage } from "./TaskboardPage";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 1_500;
 
@@ -87,6 +88,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
 }
 
 function Workspace({ session, onLogout, themePreference, onThemePreferenceChange }: { session: Session; onLogout: () => void; themePreference: ThemePreference; onThemePreferenceChange: (preference: ThemePreference) => void }) {
+  const [workspaceView, setWorkspaceView] = useState<"chat" | "taskboard">("chat");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => readSelectedConversationId());
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
@@ -847,12 +849,13 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
         <div className="wordmark"><span className="brand-mark small"><Zap size={15} /></span><span className="brand-copy"><strong>Codex Web</strong><small>SELF-HOSTED CODEX WORKSTATION</small></span></div>
         <button className="icon-button mobile-only" onClick={() => setSidebarOpen(false)} aria-label="关闭"><X size={19} /></button>
       </div>
-      <button className="new-task" onClick={() => void newConversation()}><Plus size={17} />新建任务</button>
+      <button className="new-task" onClick={() => { setWorkspaceView("chat"); void newConversation(); }}><Plus size={17} />新建任务</button>
+      <button className={`taskboard-sidebar-button ${workspaceView === "taskboard" ? "active" : ""}`} onClick={() => { setWorkspaceView("taskboard"); setSidebarOpen(false); }}><LayoutGrid size={16} />智能项目看板</button>
       <div className="search-box"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索任务" /></div>
       <div className="conversation-section"><div className="section-label"><span>任务</span><strong>{filtered.length}</strong></div>
         <div className="conversation-list" onScroll={() => setTaskMenu(null)}>
           {filtered.map((conversation) => <div key={conversation.id} className={`conversation-row ${selectedId === conversation.id ? "active" : ""} ${conversation.has_unread_result ? "unread" : ""} ${taskMenu?.conversationId === conversation.id ? "menu-open" : ""}`}>
-            <button className="conversation-select" onClick={() => setSelectedId(conversation.id)}>
+            <button className="conversation-select" onClick={() => { setWorkspaceView("chat"); setSelectedId(conversation.id); }}>
               <FolderOpen size={16} /><span>{conversation.title}</span>
               {conversation.status === "running"
                 ? <LoaderCircle size={14} className="spin" role="img" aria-label="正在执行" />
@@ -925,15 +928,16 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
       </section>
     </div>, document.body)}
 
-    <main className={`workspace ${currentDetail?.pendingPrompts.length ? "has-pending-queue" : ""}`}>
+    <main className={`workspace ${workspaceView === "chat" && currentDetail?.pendingPrompts.length ? "has-pending-queue" : ""}`}>
       <header className="mobile-header"><button className="icon-button" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={20} /></button><div className="wordmark"><span className="brand-mark small"><Zap size={14} /></span><span className="brand-copy"><strong>Codex Web</strong><small>SELF-HOSTED CODEX WORKSTATION</small></span></div></header>
-      {currentDetail ? <Chat detail={currentDetail} activities={activities} sending={sending} loadingOlderMessages={loadingOlderMessages} messagesRef={messagesRef} onMessagesScroll={handleMessagesScroll} onAskAgent={askAgentAbout} userInitials={account.initials} chatFontSize={chatFontSize} />
+      {workspaceView === "taskboard" ? <TaskboardPage onOpenConversation={(conversationId, draft) => { setInput(draft); setSelectedId(conversationId); setWorkspaceView("chat"); setSidebarOpen(false); }} />
+        : currentDetail ? <Chat detail={currentDetail} activities={activities} sending={sending} loadingOlderMessages={loadingOlderMessages} messagesRef={messagesRef} onMessagesScroll={handleMessagesScroll} onAskAgent={askAgentAbout} userInitials={account.initials} chatFontSize={chatFontSize} />
         : loadingConversation ? <ConversationLoading />
         : <Welcome onSuggestion={(text) => setInput(text)} />}
       {error && <div className="toast"><span>{error}</span><button onClick={() => setError("")}><X size={16} /></button></div>}
       {notice && <div className="toast info" role="status"><span>{notice}</span><button onClick={() => setNotice("")}><X size={16} /></button></div>}
-      {currentDetail?.conversation.archived_at && <div className="archived-conversation-banner"><Archive size={15} /><span>这个任务已归档，历史内容仍可查看。</span><button type="button" onClick={() => void restoreConversation(currentDetail.conversation)}>恢复任务</button></div>}
-      {(!selectedId || (currentDetail && !currentDetail.conversation.archived_at)) && <Composer key={selectedId ?? "new-conversation"} input={input} setInput={setInput} askAgentQuote={askAgentQuote} onClearAskAgentQuote={() => setAskAgentQuote("")} focusRequest={composerFocusRequest} files={files} setFiles={setFiles} draftFiles={composerDraft?.files ?? []} draftUploads={draftUploads} draftSaveState={draftSaveState} sending={sending} submitting={submitting} selectionSaving={selectionSaving} voiceEnabled={Boolean(session.voiceEnabled)}
+      {workspaceView === "chat" && currentDetail?.conversation.archived_at && <div className="archived-conversation-banner"><Archive size={15} /><span>这个任务已归档，历史内容仍可查看。</span><button type="button" onClick={() => void restoreConversation(currentDetail.conversation)}>恢复任务</button></div>}
+      {workspaceView === "chat" && (!selectedId || (currentDetail && !currentDetail.conversation.archived_at)) && <Composer key={selectedId ?? "new-conversation"} input={input} setInput={setInput} askAgentQuote={askAgentQuote} onClearAskAgentQuote={() => setAskAgentQuote("")} focusRequest={composerFocusRequest} files={files} setFiles={setFiles} draftFiles={composerDraft?.files ?? []} draftUploads={draftUploads} draftSaveState={draftSaveState} sending={sending} submitting={submitting} selectionSaving={selectionSaving} voiceEnabled={Boolean(session.voiceEnabled)}
         conversationId={selectedId}
         pendingPrompts={currentDetail?.pendingPrompts ?? []} editingPending={editingPending} removedEditingFileIds={removedEditingFileIds}
         agentOptions={agentOptions} selectedModel={selectedModel} reasoningEffort={reasoningEffort}

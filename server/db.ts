@@ -296,6 +296,66 @@ export class AppDatabase {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(user_id, key)
       );
+      CREATE TABLE IF NOT EXISTS taskboard_projects (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        executor_kind TEXT NOT NULL CHECK(executor_kind IN ('tenant','remote')),
+        remote_project_id TEXT,
+        automation_mode TEXT NOT NULL DEFAULT 'manual' CHECK(automation_mode IN ('manual','assist','auto_low_risk')),
+        max_concurrency INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrency BETWEEN 1 AND 8),
+        preferences TEXT NOT NULL DEFAULT '{}',
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+        archived_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(
+          (executor_kind='tenant' AND remote_project_id IS NULL)
+          OR (executor_kind='remote' AND remote_project_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES taskboard_projects(id) ON DELETE CASCADE,
+        parent_task_id TEXT REFERENCES taskboard_tasks(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'backlog' CHECK(status IN ('backlog','ready','running','review','blocked','done','cancelled')),
+        priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('urgent','high','medium','low')),
+        risk TEXT NOT NULL DEFAULT 'medium' CHECK(risk IN ('low','medium','high')),
+        estimate_points INTEGER CHECK(estimate_points IS NULL OR estimate_points BETWEEN 1 AND 100),
+        acceptance_criteria TEXT NOT NULL DEFAULT '',
+        position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        executor_kind TEXT NOT NULL CHECK(executor_kind IN ('tenant','remote')),
+        remote_project_id TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+        archived_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(parent_task_id IS NULL OR parent_task_id<>id),
+        CHECK(
+          (executor_kind='tenant' AND remote_project_id IS NULL)
+          OR (executor_kind='remote' AND remote_project_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_task_dependencies (
+        task_id TEXT NOT NULL REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        depends_on_task_id TEXT NOT NULL REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(task_id, depends_on_task_id),
+        CHECK(task_id<>depends_on_task_id)
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL REFERENCES taskboard_projects(id) ON DELETE CASCADE,
+        task_id TEXT REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        actor_user_id TEXT NOT NULL REFERENCES users(id),
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
 
     const conversationColumns = this.columnNames("conversations");
@@ -359,6 +419,11 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS jobs_conversation_idx ON jobs(conversation_id, created_at);
       CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs(status, queue_seq);
       CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+      CREATE INDEX IF NOT EXISTS taskboard_projects_user_idx ON taskboard_projects(user_id,archived_at,updated_at);
+      CREATE INDEX IF NOT EXISTS taskboard_tasks_project_idx ON taskboard_tasks(project_id,archived_at,status,position);
+      CREATE UNIQUE INDEX IF NOT EXISTS taskboard_tasks_conversation_idx ON taskboard_tasks(conversation_id) WHERE conversation_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS taskboard_dependencies_reverse_idx ON taskboard_task_dependencies(depends_on_task_id,task_id);
+      CREATE INDEX IF NOT EXISTS taskboard_events_task_idx ON taskboard_events(task_id,id);
     `);
 
     const uploadedFiles = this.sqlite.prepare("SELECT id,original_name FROM files WHERE kind='upload'").all() as Array<{ id: string; original_name: string }>;

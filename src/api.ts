@@ -41,6 +41,47 @@ export type RemoteWorkerStatus = {
   connectedAt: number;
   projects: Array<{ id: string; name: string }>;
 };
+export type TaskboardStatus = "backlog" | "ready" | "running" | "review" | "blocked" | "done" | "cancelled";
+export type TaskboardPriority = "urgent" | "high" | "medium" | "low";
+export type TaskboardRisk = "low" | "medium" | "high";
+export type TaskboardProject = {
+  id: string;
+  name: string;
+  description: string;
+  executor: ExecutorTarget;
+  automationMode: "manual" | "assist" | "auto_low_risk";
+  maxConcurrency: number;
+  version: number;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type TaskboardTask = {
+  id: string;
+  projectId: string;
+  parentTaskId: string | null;
+  title: string;
+  description: string;
+  status: TaskboardStatus;
+  priority: TaskboardPriority;
+  risk: TaskboardRisk;
+  estimatePoints: number | null;
+  acceptanceCriteria: string;
+  position: number;
+  conversationId: string | null;
+  executor: ExecutorTarget;
+  version: number;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  allowedTransitions: TaskboardStatus[];
+};
+export type TaskboardDependency = { task_id: string; depends_on_task_id: string; created_at: string };
+export type TaskboardProjectDetail = {
+  project: TaskboardProject;
+  tasks: TaskboardTask[];
+  dependencies: TaskboardDependency[];
+};
 // The online Codex catalog is authoritative. Keep this open so a newer CLI can
 // expose a new reasoning level without requiring a front-end release first.
 export type ReasoningEffort = string;
@@ -116,6 +157,54 @@ export const api = {
   conversationExecutor: (id: string) => request<{ executor: ExecutorTarget; online: boolean; canChange: boolean }>(`/conversations/${id}/executor`),
   updateConversationExecutor: (id: string, executor: ExecutorTarget) => request<{ executor: ExecutorTarget; online: boolean; canChange: boolean }>(
     `/conversations/${id}/executor`, { method: "PUT", body: JSON.stringify(executor) },
+  ),
+  taskboardProjects: () => request<{ projects: TaskboardProject[] }>("/taskboard/projects"),
+  createTaskboardProject: (input: { name: string; description?: string; executor: ExecutorTarget }) => request<{ project: TaskboardProject }>(
+    "/taskboard/projects", { method: "POST", body: JSON.stringify(input) },
+  ),
+  taskboardProject: (id: string) => request<TaskboardProjectDetail>(`/taskboard/projects/${id}`),
+  updateTaskboardProject: (id: string, input: { version: number; name?: string; description?: string; maxConcurrency?: number }) => request<{ project: TaskboardProject }>(
+    `/taskboard/projects/${id}`, { method: "PATCH", body: JSON.stringify(input) },
+  ),
+  archiveTaskboardProject: (id: string, version: number) => request<{ project: TaskboardProject }>(
+    `/taskboard/projects/${id}`, { method: "DELETE", body: JSON.stringify({ version }) },
+  ),
+  createTaskboardTask: (projectId: string, input: {
+    title: string;
+    description?: string;
+    parentTaskId?: string | null;
+    priority?: TaskboardPriority;
+    risk?: TaskboardRisk;
+    estimatePoints?: number | null;
+    acceptanceCriteria?: string;
+    conversationId?: string | null;
+  }) => request<{ task: TaskboardTask }>(
+    `/taskboard/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify(input) },
+  ),
+  updateTaskboardTask: (id: string, input: {
+    version: number;
+    title?: string;
+    description?: string;
+    parentTaskId?: string | null;
+    priority?: TaskboardPriority;
+    risk?: TaskboardRisk;
+    estimatePoints?: number | null;
+    acceptanceCriteria?: string;
+    conversationId?: string | null;
+  }) => request<{ task: TaskboardTask }>(
+    `/taskboard/tasks/${id}`, { method: "PATCH", body: JSON.stringify(input) },
+  ),
+  archiveTaskboardTask: (id: string, version: number) => request<{ task: TaskboardTask }>(
+    `/taskboard/tasks/${id}`, { method: "DELETE", body: JSON.stringify({ version }) },
+  ),
+  transitionTaskboardTask: (id: string, version: number, status: TaskboardStatus, reason = "") => request<{ task: TaskboardTask }>(
+    `/taskboard/tasks/${id}/transition`, { method: "POST", body: JSON.stringify({ version, status, reason }) },
+  ),
+  updateTaskboardDependencies: (id: string, version: number, dependencyIds: string[]) => request<{ task: TaskboardTask }>(
+    `/taskboard/tasks/${id}/dependencies`, { method: "PUT", body: JSON.stringify({ version, dependencyIds }) },
+  ),
+  taskboardTaskEvents: (id: string) => request<{ events: Array<{ id: number; event_type: string; payload: unknown; created_at: string }> }>(
+    `/taskboard/tasks/${id}/events`,
   ),
   agentOptions: () => request<AgentOptions>("/agent-options"),
   updateAgentSelection: (selection: AgentSelection, conversationId?: string) => request<{ selection: AgentSelection }>(

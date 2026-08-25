@@ -22,6 +22,8 @@ import { RemoteExecutorStore } from "./remote-executor-store.js";
 import { RemoteRoutingRunner } from "./remote-runner-routing.js";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
+import { installTaskboardApiRoutes } from "./taskboard-api.js";
+import { TaskboardStore } from "./taskboard-store.js";
 
 const COOKIE_NAME = "cww_session";
 const CONVERSATION_MESSAGE_PAGE_SIZE = 30;
@@ -102,6 +104,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
   const tenantRunner = new CodexRunner(config, db, publish);
   const remoteWorkerGateway = new RemoteWorkerGateway();
   const remoteExecutorStore = new RemoteExecutorStore(db);
+  const taskboardStore = new TaskboardStore(db);
   const runner = new RemoteRoutingRunner(tenantRunner, db, {
     store: remoteExecutorStore,
     gateway: remoteWorkerGateway,
@@ -369,6 +372,8 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     }
     return next();
   });
+
+  installTaskboardApiRoutes(api, taskboardStore, remoteWorkerGateway);
 
   api.post("/auth/logout", (req, res) => {
     const token = req.cookies?.[COOKIE_NAME];
@@ -1008,7 +1013,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
 
   if (config.queueAutoStart) setImmediate(() => void pumpQueue());
   return {
-    app, db, runner, config, pumpQueue, remoteWorkerGateway, remoteExecutorStore, remoteWorkerService,
+    app, db, runner, config, pumpQueue, remoteWorkerGateway, remoteExecutorStore, remoteWorkerService, taskboardStore,
     beginShutdown: () => { shuttingDown = true; },
   };
 }
