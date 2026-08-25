@@ -102,4 +102,8 @@ A remote project can go offline after selection. The UI marks it offline, and ne
 - The management transport currently uses authenticated outbound long polling rather than WSS.
 - Worker provisioning and token rotation are manual.
 
+## Validation status
+
+The remote runner, owner executor API, secret-isolation adapter, and web selector have dedicated tests or strict TypeScript harnesses in this branch. Before merging, run the repository's full `npm test` and Docker build on a machine with normal package and container access, then perform one end-to-end Windows or macOS worker run against a disposable project.
+
 The next integration slice should add explicit attachment staging, result synchronization with size and path limits, worker enrollment/rotation, and end-to-end deployment tests on both Windows and macOS.
