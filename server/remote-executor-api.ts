@@ -39,6 +39,7 @@ export function installRemoteExecutorApiRoutes(
     return res.json({
       executor,
       online: executor.kind === "tenant" || options.gateway.hasProject(executor.projectId),
+      canChange: executorCanChange(db, conversation.id, conversation.codex_thread_id),
     });
   });
 
@@ -67,7 +68,7 @@ export function installRemoteExecutorApiRoutes(
     try {
       const executor = options.store.set(conversation.id, target);
       noStore(res);
-      return res.json({ executor, online: true });
+      return res.json({ executor, online: true, canChange: true });
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : "执行位置设置无效。" });
     }
