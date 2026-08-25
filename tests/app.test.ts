@@ -418,6 +418,7 @@ test("the owner tenant has a dedicated Unix identity and workers reject cross-te
   assert.throws(() => validateTenantWorkerRequest({ ...request, imagePaths: [path.join(tenantRoot, "..", "secret.png")] }, owner.userId, tenantRoot), /escapes workspace/);
   const executionSource = fs.readFileSync(path.join(process.cwd(), "server", "tenant-worker-execution.ts"), "utf8");
   const composeSource = fs.readFileSync(path.join(process.cwd(), "compose.yaml"), "utf8");
+  const permissionSource = fs.readFileSync(path.join(process.cwd(), "scripts", "migrate-tenant-permissions.sh"), "utf8");
   assert.match(executionSource, /executablePath: process\.env\.CODEX_RUNTIME_PATH/);
   const appServerSource = fs.readFileSync(path.join(process.cwd(), "server", "app-server-turn.ts"), "utf8");
   assert.match(appServerSource, /"turn\/steer"/);
@@ -429,6 +430,7 @@ test("the owner tenant has a dedicated Unix identity and workers reject cross-te
   assert.match(composeSource, /- CHOWN/);
   assert.match(composeSource, /- FOWNER/);
   assert.match(composeSource, /- DAC_READ_SEARCH/);
+  assert.ok(permissionSource.indexOf('mkdir -p "$data_root" "$tenant_root" "$tenant"') < permissionSource.indexOf('chown "$web_uid:$web_uid" "$tenant_root"'));
 });
 
 test("conversation workspaces stay concise while tenants receive the managed local spreadsheet skill", (context) => {

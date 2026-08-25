@@ -16,14 +16,13 @@ for root in "$data_root" "$tenant_root"; do
 done
 command -v setfacl >/dev/null 2>&1 || { echo "setfacl is required" >&2; exit 1; }
 
-mkdir -p "$data_root" "$tenant_root"
+tenant="$tenant_root/$owner_id"
+mkdir -p "$data_root" "$tenant_root" "$tenant"
 chown -R "$web_uid:$web_uid" "$data_root"
 chmod 0700 "$data_root"
 chown "$web_uid:$web_uid" "$tenant_root"
 chmod 0711 "$tenant_root"
 
-tenant="$tenant_root/$owner_id"
-mkdir -p "$tenant"
 chown -R "$tenant_uid:$tenant_gid" "$tenant"
 chmod -R go-rwx "$tenant"
 
