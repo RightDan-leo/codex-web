@@ -539,6 +539,11 @@ test("production binding permits public bind only when explicitly containerized"
   assert.doesNotThrow(() => assertProductionConfig({ ...base, host: "127.0.0.1", containerized: false }));
   assert.doesNotThrow(() => assertProductionConfig({ ...base, host: "0.0.0.0", containerized: true }));
   assert.throws(() => assertProductionConfig({ ...base, host: "0.0.0.0", containerized: false }), /hardened container/);
+  assert.doesNotThrow(() => assertProductionConfig({ ...base, publicBaseUrl: "https://node.example.ts.net/codex-web" }));
+  assert.doesNotThrow(() => assertProductionConfig({ ...base, publicBaseUrl: "http://localhost:37821/codex-web" }));
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "http://public.example/codex-web" }), /must use HTTPS/);
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "https://public.example/wrong-path" }), /path must match BASE_PATH/);
+  assert.throws(() => assertProductionConfig({ ...base, publicBaseUrl: "https://user:secret@public.example/codex-web" }), /without credentials/);
 });
 
 test("agent options use the live image-capable catalog and default to Sol with extra-high reasoning", (context) => {

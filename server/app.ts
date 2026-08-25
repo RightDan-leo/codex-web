@@ -23,6 +23,7 @@ import { RemoteRoutingRunner } from "./remote-runner-routing.js";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
 import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
 import { installTaskboardApiRoutes } from "./taskboard-api.js";
+import { isBrowserOriginAllowed, shouldUseSecureCookie } from "./request-security.js";
 import { TaskboardStore } from "./taskboard-store.js";
 
 const COOKIE_NAME = "cww_session";
@@ -337,10 +338,9 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     const csrfToken = crypto.randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.now() + config.sessionTtlHours * 3600_000);
     db.createSession(hashToken(token, config.sessionSecret), csrfToken, expiresAt.toISOString(), user.id);
-    const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
     res.cookie(COOKIE_NAME, token, {
       httpOnly: true,
-      secure: req.secure || forwardedProto === "https",
+      secure: shouldUseSecureCookie(req, config.publicBaseUrl),
       sameSite: "strict",
       path: config.basePath || "/",
       expires: expiresAt,
@@ -366,15 +366,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
     const session = res.locals.session as SessionRow;
     if (req.get("x-csrf-token") !== session.csrf_token) return res.status(403).json({ error: "安全校验失败，请刷新页面后重试。" });
-    const origin = req.get("origin");
-    const expectedHost = String(req.get("host") ?? "").trim();
-    if (origin) {
-      try {
-        if (new URL(origin).host !== expectedHost) return res.status(403).json({ error: "请求来源不受信任。" });
-      } catch {
-        return res.status(403).json({ error: "请求来源不受信任。" });
-      }
-    }
+    if (!isBrowserOriginAllowed(req, config.publicBaseUrl)) return res.status(403).json({ error: "请求来源不受信任。" });
     return next();
   });
 

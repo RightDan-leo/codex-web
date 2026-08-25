@@ -6,6 +6,7 @@ import type { ExecutorTarget } from "./executor-router.js";
 import { RemoteExecutorStore } from "./remote-executor-store.js";
 import { canChangeExecutor } from "./remote-executor-policy.js";
 import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
+import { isBrowserOriginAllowed } from "./request-security.js";
 
 const COOKIE_NAME = "cww_session";
 const SAFE_PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -48,7 +49,7 @@ export function installRemoteExecutorApiRoutes(
 
   app.put(`${apiPath}/conversations/:id/executor`, (req, res) => {
     const session = authenticate(req, res, db, config, true);
-    if (!session || !verifyWriteRequest(req, res, session)) return;
+    if (!session || !verifyWriteRequest(req, res, session, config)) return;
     const conversation = db.getConversationForUser(String(req.params.id), session.user_id);
     if (!conversation) return res.status(404).json({ error: "会话不存在。" });
 
@@ -130,17 +131,12 @@ function authenticate(
   return session;
 }
 
-function verifyWriteRequest(req: Request, res: Response, session: SessionRow): boolean {
+function verifyWriteRequest(req: Request, res: Response, session: SessionRow, config: AppConfig): boolean {
   if (req.get("x-csrf-token") !== session.csrf_token) {
     res.status(403).json({ error: "安全校验失败，请刷新页面后重试。" });
     return false;
   }
-  const origin = req.get("origin");
-  if (!origin) return true;
-  const expectedHost = String(req.get("host") ?? "").trim();
-  try {
-    if (new URL(origin).host === expectedHost) return true;
-  } catch { /* Fall through to the same untrusted-origin response. */ }
+  if (isBrowserOriginAllowed(req, config.publicBaseUrl)) return true;
   res.status(403).json({ error: "请求来源不受信任。" });
   return false;
 }

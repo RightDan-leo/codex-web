@@ -38,8 +38,10 @@ services:
       - seccomp=unconfined
       - apparmor=unconfined
     pids_limit: 1024
-    mem_limit: 8g
-    cpus: 3.5
+    # Defaults fit a 2 vCPU / 4 GiB host while leaving memory for Docker,
+    # Tailscale, and the operating system. Larger hosts can override both.
+    mem_limit: ${CODEX_WEB_MEMORY_LIMIT:-3g}
+    cpus: ${CODEX_WEB_CPU_LIMIT:-1.8}
     # Let SIGTERM drain in-flight Codex jobs before Docker sends SIGKILL.
     stop_grace_period: 30m
     healthcheck:

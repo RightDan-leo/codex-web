@@ -189,6 +189,8 @@ For the public build, the web process has no Docker socket, host filesystem moun
 
 State is stored in Docker named volumes. Closing the browser does not remove queued work, attachments, unsent composer drafts, or archived conversations.
 
+For private mobile access, start with Tailscale Serve so HTTPS is available only inside the tailnet while the container port remains loopback-only. A later move to a public domain changes only the reverse proxy and `PUBLIC_BASE_URL`; volumes, sessions, and Remote Worker project mappings remain intact. See the [deployment guide](docs/DEPLOYMENT.md).
+
 ## Optional voice transcription
 
 Set `DASHSCOPE_API_KEY` and an HTTPS `PUBLIC_BASE_URL` in `.env` to enable the microphone button. The default model is `qwen3.5-omni-plus`; you can override it with `DASHSCOPE_ASR_MODEL`. Microphone access requires a secure browser context.
