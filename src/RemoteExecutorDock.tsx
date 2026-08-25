@@ -10,10 +10,9 @@ import {
   parseExecutorValue,
 } from "./remote-executor";
 import { forgetExecutorTarget, rememberExecutorTarget } from "./remote-executor-state";
+import { readSelectedConversationId, subscribeSelectedConversation } from "./conversation-selection";
 import "./remote-executor.css";
 
-const SELECTED_CONVERSATION_KEY = "codex-web:selected-conversation";
-const SELECTION_POLL_MS = 350;
 const STATUS_POLL_MS = 8_000;
 
 type ExecutorSnapshot = {
@@ -21,18 +20,13 @@ type ExecutorSnapshot = {
   canChange: boolean;
 };
 
-function selectedConversationId(): string | null {
-  try { return window.localStorage.getItem(SELECTED_CONVERSATION_KEY); }
-  catch { return null; }
-}
-
 function findPortalTarget(): HTMLElement | null {
   return document.querySelector<HTMLElement>(".chat-header-actions");
 }
 
 export function RemoteExecutorDock() {
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(() => findPortalTarget());
-  const [conversationId, setConversationId] = useState<string | null>(() => selectedConversationId());
+  const [conversationId, setConversationId] = useState<string | null>(() => readSelectedConversationId());
   const [snapshot, setSnapshot] = useState<ExecutorSnapshot | null>(null);
   const [workers, setWorkers] = useState<RemoteWorkerStatus[]>([]);
   const [remoteEnabled, setRemoteEnabled] = useState(false);
@@ -55,19 +49,9 @@ export function RemoteExecutorDock() {
   }, []);
 
   useEffect(() => {
-    const sync = () => {
-      const next = selectedConversationId();
+    return subscribeSelectedConversation((next) => {
       setConversationId((current) => current === next ? current : next);
-    };
-    sync();
-    const timer = window.setInterval(sync, SELECTION_POLL_MS);
-    window.addEventListener("focus", sync);
-    window.addEventListener("pageshow", sync);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", sync);
-      window.removeEventListener("pageshow", sync);
-    };
+    });
   }, []);
 
   const refresh = useCallback(async (id: string, showErrors = false) => {
@@ -76,7 +60,7 @@ export function RemoteExecutorDock() {
       api.remoteWorkers(),
       api.conversationExecutor(id),
     ]);
-    if (generation !== requestGenerationRef.current || selectedConversationId() !== id) return;
+    if (generation !== requestGenerationRef.current || readSelectedConversationId() !== id) return;
 
     if (workerResult.status === "fulfilled") {
       setOwnerAccess("allowed");
@@ -182,16 +166,16 @@ export function RemoteExecutorDock() {
     setError("");
     try {
       const result = await api.updateConversationExecutor(id, target);
-      if (selectedConversationId() !== id) return;
+      if (readSelectedConversationId() !== id) return;
       setSnapshot({ target: result.executor, canChange: result.canChange });
       rememberExecutorTarget(id, result.executor);
       setOpen(false);
     } catch (reason) {
-      if (selectedConversationId() === id) {
+      if (readSelectedConversationId() === id) {
         setError(reason instanceof Error ? reason.message : "执行位置保存失败");
       }
     } finally {
-      if (selectedConversationId() === id) setBusy(false);
+      if (readSelectedConversationId() === id) setBusy(false);
     }
   }
 
@@ -201,7 +185,7 @@ export function RemoteExecutorDock() {
   const remoteSelected = snapshot.target.kind === "remote";
   const lockedReason = snapshot.canChange
     ? ""
-    : "首次任务运行后执行位置会锁定；需要更换时请新建任务。";
+    : "保存草稿或开始任务后执行位置会锁定；需要更换时请新建任务。";
 
   return createPortal(<div ref={rootRef} className={`remote-executor-dock ${remoteSelected ? "remote" : "tenant"} ${online ? "online" : "offline"}`}>
     <button

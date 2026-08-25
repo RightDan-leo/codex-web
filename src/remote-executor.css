@@ -37,6 +37,9 @@
   top: calc(100% + 9px);
   right: 0;
   width: min(390px, calc(100vw - 28px));
+  max-height: min(70vh, 620px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 15px;
@@ -60,7 +63,7 @@
 .remote-executor-availability.enabled { color: #187b4a !important; background: rgba(34, 169, 98, .11); }
 .remote-executor-availability.disabled { color: var(--muted) !important; background: rgba(123, 127, 142, .12); }
 
-.remote-executor-options { display: grid; gap: 5px; padding: 9px; }
+.remote-executor-options { min-height: 0; display: grid; gap: 5px; padding: 9px; overflow-y: auto; overscroll-behavior: contain; }
 .remote-executor-options > button {
   width: 100%;
   min-height: 51px;
@@ -125,6 +128,12 @@ html[data-theme="dark"] .remote-executor-dock.remote.offline .remote-executor-tr
   .remote-executor-trigger { max-width: 150px; min-height: 34px; padding: 5px 7px; }
   .remote-executor-trigger-copy small { display: none; }
   .remote-executor-trigger-copy strong { max-width: 82px; font-size: 10.5px; }
-  .remote-executor-panel { position: fixed; top: 66px; right: 10px; width: calc(100vw - 20px); }
+  .remote-executor-panel {
+    position: fixed;
+    top: calc(66px + env(safe-area-inset-top, 0px));
+    right: 10px;
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 78px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  }
   .remote-executor-panel > header { align-items: center; }
 }

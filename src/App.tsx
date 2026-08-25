@@ -11,6 +11,7 @@ import { api, BASE_PATH, fileUrl, setCsrf, type AgentOptions, type ComposerDraft
 import { isBrowserPreviewable, isLocalMarkdownUrl, resolveMessageFileLink } from "./file-links";
 import { sanitizeAgentMarkdown } from "./agent-content";
 import { chooseComposerPrimaryAction } from "./composer-action";
+import { readSelectedConversationId, writeSelectedConversationId } from "./conversation-selection";
 import { chooseSelectedConversation, mergeJobEvents } from "./recovery";
 import { resolveAccountIdentity } from "./account-identity";
 import { CHAT_FONT_SIZE_DEFAULT, CHAT_FONT_SIZE_MAX, CHAT_FONT_SIZE_MIN, normalizeChatFontSize } from "./chat-font-size";
@@ -21,7 +22,6 @@ import { resolveScrollFollow } from "./scroll-follow";
 import { buildProcessJournal, isNarrativeActivity } from "./process-journal";
 import { formatRolloutBytes, shouldWarnAboutRollout } from "./rollout-capacity";
 
-const SELECTED_CONVERSATION_KEY = "codex-web:selected-conversation";
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 1_500;
 
 type DraftSaveState = "idle" | "unsaved" | "saving" | "saved" | "error";
@@ -88,7 +88,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
 
 function Workspace({ session, onLogout, themePreference, onThemePreferenceChange }: { session: Session; onLogout: () => void; themePreference: ThemePreference; onThemePreferenceChange: (preference: ThemePreference) => void }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(() => window.localStorage.getItem(SELECTED_CONVERSATION_KEY));
+  const [selectedId, setSelectedId] = useState<string | null>(() => readSelectedConversationId());
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -306,7 +306,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
     prependScrollRestoreRef.current = null;
     setLoadingOlderMessages(false);
     if (!selectedId) {
-      window.localStorage.removeItem(SELECTED_CONVERSATION_KEY);
+      writeSelectedConversationId(null);
       eventSourceRef.current?.close(); connectedJobRef.current = null;
       setDetail(null); setJob(null); setSending(false); setActivities([]);
       setEditingPending(null); setRemovedEditingFileIds([]); setAskAgentQuote("");
@@ -318,7 +318,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
       }
       return;
     }
-    window.localStorage.setItem(SELECTED_CONVERSATION_KEY, selectedId);
+    writeSelectedConversationId(selectedId);
     eventSourceRef.current?.close(); connectedJobRef.current = null; setActivities([]);
     editingPendingRef.current = null; setEditingPending(null); setRemovedEditingFileIds([]); setFiles([]); setDraftUploads([]);
     const cached = draftCacheRef.current.get(selectedId);
@@ -490,7 +490,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
       if (selectedIdRef.current !== id) return;
       const items = await refreshList().catch(() => [] as Conversation[]);
       if (!items.some((conversation) => conversation.id === id)) {
-        window.localStorage.removeItem(SELECTED_CONVERSATION_KEY);
+        writeSelectedConversationId(null);
         setSelectedId(chooseSelectedConversation(null, items));
       } else {
         setError(reason instanceof Error ? reason.message : "状态刷新失败");
@@ -536,7 +536,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "草稿附件上传失败");
     } finally {
-      const ids = new Set(uploads.map((upload) => upload.id));
+      const ids = new Set<string>(uploads.map((upload) => upload.id));
       setDraftUploads((current) => current.filter((upload) => !ids.has(upload.id)));
     }
   }
