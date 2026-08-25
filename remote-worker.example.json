@@ -1,0 +1,15 @@
+{
+  "serverUrl": "https://example.com/codex-worker",
+  "workerId": "my-development-pc",
+  "displayName": "My Development PC",
+  "defaultModel": "gpt-5.6-codex",
+  "defaultReasoningEffort": "medium",
+  "projects": [
+    {
+      "id": "magic-zombie",
+      "name": "MagicZombie",
+      "cwd": "D:\\MagicZombie",
+      "codexHome": "C:\\Users\\your-name\\.codex"
+    }
+  ]
+}
