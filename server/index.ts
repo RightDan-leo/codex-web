@@ -3,14 +3,27 @@ import path from "node:path";
 import pino from "pino";
 import { createApp } from "./app.js";
 import { assertProductionConfig } from "./config.js";
+import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
 
 const { app, db, config, runner, beginShutdown } = createApp();
 assertProductionConfig(config);
 fs.mkdirSync(path.join(config.dataRoot, "logs"), { recursive: true });
 const logger = pino(pino.destination({ dest: path.join(config.dataRoot, "logs", "app.log"), sync: false }));
+const remoteWorkerToken = process.env.REMOTE_WORKER_TOKEN ?? "";
+const remoteWorkerService = remoteWorkerToken
+  ? installRemoteWorkerHttpRoutes(app, {
+      token: remoteWorkerToken,
+      path: process.env.REMOTE_WORKER_PATH || "/codex-worker",
+    })
+  : undefined;
 
 const server = app.listen(config.port, config.host, () => {
-  logger.info({ host: config.host, port: config.port, basePath: config.basePath }, "Codex Web started");
+  logger.info({
+    host: config.host,
+    port: config.port,
+    basePath: config.basePath,
+    remoteWorkerEnabled: Boolean(remoteWorkerService),
+  }, "Codex Web started");
 });
 
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 29 * 60_000;
@@ -20,6 +33,7 @@ async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   beginShutdown();
+  remoteWorkerService?.close();
   logger.info({ signal }, "Codex Web stopping");
   const deadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
   while ((db.runningJobCount() > 0 || runner.activeJobCount > 0) && Date.now() < deadline) {
