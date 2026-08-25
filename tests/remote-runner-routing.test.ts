@@ -3,7 +3,7 @@ import test from "node:test";
 import type { CodexRunner } from "../server/codex-runner.js";
 import type { AppDatabase } from "../server/db.js";
 import type { RemoteExecutorStore } from "../server/remote-executor-store.js";
-import { installRemoteRunnerRouting } from "../server/remote-runner-routing.js";
+import { RemoteRoutingRunner } from "../server/remote-runner-routing.js";
 import { RemoteWorkerGateway } from "../server/remote-worker-gateway.js";
 
 const hello = {
@@ -78,12 +78,12 @@ function fixture() {
     cancel: () => false,
     conversationRolloutBytes: () => 321,
   } as unknown as CodexRunner;
-  const routing = installRemoteRunnerRouting(runner, db, {
+  const routing = new RemoteRoutingRunner(runner, db, {
     gateway,
     store,
     publish: (_jobId, type, payload) => events.push({ type, payload }),
   });
-  return { runner, routing, gateway, sent, targets, events, messages, finishes, get tenantRuns() { return tenantRuns; } };
+  return { runner: routing, routing, gateway, sent, targets, events, messages, finishes, get tenantRuns() { return tenantRuns; } };
 }
 
 test("remote runner routing keeps tenant execution as the default", async () => {

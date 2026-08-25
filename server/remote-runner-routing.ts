@@ -12,13 +12,6 @@ import { RemoteWorkerGateway, type RemoteRunExecution } from "./remote-worker-ga
 
 type Publish = (jobId: string, eventType: string, payload: unknown) => void;
 
-type MutableRunner = {
-  run(jobId: string, conversationId: string, prompt: string, uploads: FileRow[], selection: AgentSelection): Promise<void>;
-  steer(jobId: string, prompt: string, uploads: FileRow[]): Promise<string>;
-  cancel(jobId: string): boolean;
-  conversationRolloutBytes(conversationId: string): number | null;
-};
-
 type RemoteActiveRun = {
   controller: AbortController;
   execution: RemoteRunExecution;
@@ -27,112 +20,104 @@ type RemoteActiveRun = {
 export type RemoteRunnerRoutingOptions = {
   gateway: RemoteWorkerGateway;
   store: RemoteExecutorStore;
-  publish?: Publish;
+  publish: Publish;
   workspaceForConversation?(conversationId: string, userId: string): string;
 };
 
-export type RemoteRunnerRouting = {
-  get activeRemoteJobCount(): number;
-  close(): void;
-};
-
 /**
- * Installs a narrow routing decorator on the existing CodexRunner instance.
- * The application queue already closes over this object, so replacing its
- * public methods keeps the upstream queue/UI code untouched. Tenant methods
- * remain the default path and are delegated to verbatim.
+ * Explicit runner decorator. The application closes over this object from the
+ * start, so tenant behavior stays unchanged without mutating CodexRunner
+ * methods, reading private fields, or replacing prototype accessors.
  */
-export function installRemoteRunnerRouting(
-  runner: CodexRunner,
-  db: AppDatabase,
-  options: RemoteRunnerRoutingOptions,
-): RemoteRunnerRouting {
-  const mutable = runner as unknown as MutableRunner;
-  const publish = options.publish ?? runnerPublish(runner);
-  const originalRun = mutable.run.bind(runner);
-  const originalSteer = mutable.steer.bind(runner);
-  const originalCancel = mutable.cancel.bind(runner);
-  const originalRolloutBytes = mutable.conversationRolloutBytes.bind(runner);
-  const prototype = Object.getPrototypeOf(runner) as object;
-  const activeDescriptor = Object.getOwnPropertyDescriptor(prototype, "activeJobCount");
-  const tenantActiveJobCount = () => Number(activeDescriptor?.get?.call(runner) ?? 0);
-  const remoteExecutions = new Map<string, RemoteActiveRun>();
+export class RemoteRoutingRunner {
+  private readonly remoteExecutions = new Map<string, RemoteActiveRun>();
 
-  Object.defineProperty(runner, "activeJobCount", {
-    configurable: true,
-    get: () => tenantActiveJobCount() + remoteExecutions.size,
-  });
+  constructor(
+    private readonly tenantRunner: CodexRunner,
+    private readonly db: AppDatabase,
+    private readonly options: RemoteRunnerRoutingOptions,
+  ) {}
 
-  mutable.conversationRolloutBytes = (conversationId: string): number | null => {
-    return options.store.get(conversationId).kind === "remote" ? null : originalRolloutBytes(conversationId);
-  };
+  get activeJobCount(): number {
+    return this.tenantRunner.activeJobCount + this.remoteExecutions.size;
+  }
 
-  mutable.cancel = (jobId: string): boolean => {
-    const remote = remoteExecutions.get(jobId);
-    if (!remote) return originalCancel(jobId);
+  get activeRemoteJobCount(): number {
+    return this.remoteExecutions.size;
+  }
+
+  conversationRolloutBytes(conversationId: string): number | null {
+    return this.options.store.get(conversationId).kind === "remote"
+      ? null
+      : this.tenantRunner.conversationRolloutBytes(conversationId);
+  }
+
+  cancel(jobId: string): boolean {
+    const remote = this.remoteExecutions.get(jobId);
+    if (!remote) return this.tenantRunner.cancel(jobId);
     remote.controller.abort();
     return true;
-  };
+  }
 
-  mutable.steer = async (jobId: string, prompt: string, uploads: FileRow[]): Promise<string> => {
-    const job = db.getJob(jobId);
+  async steer(jobId: string, prompt: string, uploads: FileRow[]): Promise<string> {
+    const job = this.db.getJob(jobId);
     if (!job || job.status !== "running") throw new Error("当前任务已经结束，无法引导");
-    const target = options.store.get(job.conversation_id);
-    if (target.kind === "tenant") return originalSteer(jobId, prompt, uploads);
+    const target = this.options.store.get(job.conversation_id);
+    if (target.kind === "tenant") return this.tenantRunner.steer(jobId, prompt, uploads);
     if (uploads.length > 0) throw new Error("远端任务暂不支持在实时引导中追加附件");
-    const remote = remoteExecutions.get(jobId);
+    const remote = this.remoteExecutions.get(jobId);
     if (!remote) throw new Error("远端任务尚未进入可引导状态，请稍后重试");
     const turnId = await remote.execution.steer(buildAgentSteerPrompt(prompt, []));
-    publish(jobId, "progress", { kind: "status", label: "远端 Codex 已收到实时引导，正在调整当前任务" });
+    this.options.publish(jobId, "progress", { kind: "status", label: "远端 Codex 已收到实时引导，正在调整当前任务" });
     return turnId;
-  };
+  }
 
-  mutable.run = async (
+  async run(
     jobId: string,
     conversationId: string,
     prompt: string,
     uploads: FileRow[],
     selection: AgentSelection,
-  ): Promise<void> => {
-    const target = options.store.get(conversationId);
-    if (target.kind === "tenant") return originalRun(jobId, conversationId, prompt, uploads, selection);
+  ): Promise<void> {
+    const target = this.options.store.get(conversationId);
+    if (target.kind === "tenant") return this.tenantRunner.run(jobId, conversationId, prompt, uploads, selection);
 
     const controller = new AbortController();
     try {
-      const conversation = db.getConversation(conversationId);
+      const conversation = this.db.getConversation(conversationId);
       if (!conversation) throw new Error("会话不存在");
-      const job = db.getJob(jobId);
+      const job = this.db.getJob(jobId);
       const shouldGenerateTitle = conversation.title_source === "default"
-        && Boolean(job?.message_id && db.isFirstUserMessage(conversationId, job.message_id));
-      if (!options.gateway.hasProject(target.projectId)) throw new Error(`远端项目当前离线：${target.projectId}`);
+        && Boolean(job?.message_id && this.db.isFirstUserMessage(conversationId, job.message_id));
+      if (!this.options.gateway.hasProject(target.projectId)) throw new Error(`远端项目当前离线：${target.projectId}`);
 
       const effectivePrompt = buildAgentTurnPrompt({
         userPrompt: prompt,
         attachments: [],
-        interruptedContext: latestUserCancellationContext(db.listMessages(conversationId)),
+        interruptedContext: latestUserCancellationContext(this.db.listMessages(conversationId)),
       });
       let attachments = [] as Awaited<ReturnType<typeof buildRemoteAttachmentPayloads>>;
       if (uploads.length > 0) {
-        if (!options.workspaceForConversation) throw new Error("服务器未配置远端附件工作区解析器");
-        publish(jobId, "status", {
+        if (!this.options.workspaceForConversation) throw new Error("服务器未配置远端附件工作区解析器");
+        this.options.publish(jobId, "status", {
           status: "running",
           label: `正在安全打包 ${uploads.length} 个远端附件`,
           executor: { kind: "remote", projectId: target.projectId },
         });
-        const workspace = options.workspaceForConversation(conversationId, conversation.user_id);
+        const workspace = this.options.workspaceForConversation(conversationId, conversation.user_id);
         attachments = await buildRemoteAttachmentPayloads(workspace, uploads);
       }
 
-      db.updateJob(jobId, "running");
-      db.updateConversation(conversationId, { status: "running" });
-      publish(jobId, "status", {
+      this.db.updateJob(jobId, "running");
+      this.db.updateConversation(conversationId, { status: "running" });
+      this.options.publish(jobId, "status", {
         status: "running",
         label: `正在远端项目 ${target.projectId} 中处理`,
         executor: { kind: "remote", projectId: target.projectId },
         attachmentCount: attachments.length,
       });
 
-      const execution = options.gateway.start({
+      const execution = this.options.gateway.start({
         jobId,
         projectId: target.projectId,
         prompt: effectivePrompt,
@@ -141,34 +126,29 @@ export function installRemoteRunnerRouting(
         reasoningEffort: selection.reasoningEffort,
         ...(attachments.length > 0 ? { attachments } : {}),
       }, {
-        onThreadStarted: (threadId) => db.updateConversation(conversationId, { codexThreadId: threadId }),
-        onProgress: (payload) => publish(jobId, "progress", payload),
+        onThreadStarted: (threadId) => this.db.updateConversation(conversationId, { codexThreadId: threadId }),
+        onProgress: (payload) => this.options.publish(jobId, "progress", payload),
       });
-      remoteExecutions.set(jobId, { controller, execution });
-      controller.signal.addEventListener("abort", () => {
-        try { execution.interrupt(); }
-        catch { /* The worker may already be disconnected. */ }
-      }, { once: true });
+      this.remoteExecutions.set(jobId, { controller, execution });
+      controller.signal.addEventListener("abort", () => execution.interrupt(), { once: true });
 
       const rawFinalResponse = await execution.result;
       if (controller.signal.aborted) throw abortError();
-      publish(jobId, "status", { status: "running", label: "远端任务已完成，正在整理结果" });
+      this.options.publish(jobId, "status", { status: "running", label: "远端任务已完成，正在整理结果" });
 
       const messageId = newId();
       const createdAt = new Date().toISOString();
-      const safeFinalResponse = sanitizeAgentMarkdown(rawFinalResponse, db.listFiles(conversationId));
-      db.addMessage({
+      const safeFinalResponse = sanitizeAgentMarkdown(rawFinalResponse, this.db.listFiles(conversationId));
+      this.db.addMessage({
         id: messageId,
         conversation_id: conversationId,
         role: "assistant",
         content: safeFinalResponse || "远端任务已完成。",
         created_at: createdAt,
       });
-      if (shouldGenerateTitle) {
-        db.setAiConversationTitleIfDefault(conversationId, parseAutoTitleResponse("", prompt).title);
-      }
-      db.finishJob(jobId, conversationId, "completed");
-      publish(jobId, "done", {
+      if (shouldGenerateTitle) this.db.setAiConversationTitleIfDefault(conversationId, parseAutoTitleResponse("", prompt).title);
+      this.db.finishJob(jobId, conversationId, "completed");
+      this.options.publish(jobId, "done", {
         status: "completed",
         executor: { kind: "remote", projectId: target.projectId },
         attachmentCount: attachments.length,
@@ -179,32 +159,23 @@ export function installRemoteRunnerRouting(
       const message = cancelled
         ? "任务已停止"
         : error instanceof Error ? redactBrandForDisplay(error.message) : "远端 Agent 任务失败";
-      try { db.finishJob(jobId, conversationId, cancelled ? "cancelled" : "failed", message); }
+      try { this.db.finishJob(jobId, conversationId, cancelled ? "cancelled" : "failed", message); }
       catch { /* Database recovery will reconcile an interrupted job on restart. */ }
       try {
-        publish(jobId, cancelled ? "done" : "failed", {
+        this.options.publish(jobId, cancelled ? "done" : "failed", {
           status: cancelled ? "cancelled" : "failed",
           message,
           executor: { kind: "remote", projectId: target.projectId },
         });
       } catch { /* Keep transport failures from crashing the process. */ }
     } finally {
-      remoteExecutions.delete(jobId);
+      this.remoteExecutions.delete(jobId);
     }
-  };
+  }
 
-  return {
-    get activeRemoteJobCount() { return remoteExecutions.size; },
-    close: () => {
-      for (const remote of remoteExecutions.values()) remote.controller.abort();
-    },
-  };
-}
-
-function runnerPublish(runner: CodexRunner): Publish {
-  const publish = (runner as unknown as { publish?: Publish }).publish;
-  if (typeof publish !== "function") throw new Error("CodexRunner publish hook is unavailable");
-  return publish.bind(runner);
+  close(): void {
+    for (const remote of this.remoteExecutions.values()) remote.controller.abort();
+  }
 }
 
 function abortError(): Error {

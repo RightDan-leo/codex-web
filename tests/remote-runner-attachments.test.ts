@@ -6,11 +6,17 @@ import test from "node:test";
 import type { CodexRunner } from "../server/codex-runner.js";
 import type { AppDatabase, FileRow } from "../server/db.js";
 import type { RemoteExecutorStore } from "../server/remote-executor-store.js";
-import { installRemoteRunnerRouting } from "../server/remote-runner-routing.js";
+import { RemoteRoutingRunner } from "../server/remote-runner-routing.js";
 import { RemoteWorkerGateway } from "../server/remote-worker-gateway.js";
 
 function immediate(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitForSend(sent: unknown[], timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (sent.length === 0 && Date.now() < deadline) await immediate();
+  assert.ok(sent.length > 0, "remote run was not dispatched before timeout");
 }
 
 test("remote runner packages conversation uploads without sending server paths", async () => {
@@ -75,7 +81,7 @@ test("remote runner packages conversation uploads without sending server paths",
     cancel: () => false,
     conversationRolloutBytes: () => 0,
   } as unknown as CodexRunner;
-  installRemoteRunnerRouting(runner, db, {
+  const routedRunner = new RemoteRoutingRunner(runner, db, {
     gateway,
     store,
     publish: () => {},
@@ -94,8 +100,8 @@ test("remote runner packages conversation uploads without sending server paths",
   };
 
   try {
-    const running = runner.run(job.id, conversation.id, "read input", [upload], { model: "model", reasoningEffort: "medium" });
-    for (let attempt = 0; attempt < 20 && sent.length === 0; attempt += 1) await immediate();
+    const running = routedRunner.run(job.id, conversation.id, "read input", [upload], { model: "model", reasoningEffort: "medium" });
+    await waitForSend(sent);
     const run = sent[0];
     assert.equal(run.type, "server.run");
     assert.equal(run.attachments?.length, 1);

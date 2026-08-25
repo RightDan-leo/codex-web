@@ -33,7 +33,7 @@ export function installRemoteExecutorApiRoutes(
   });
 
   app.get(`${apiPath}/conversations/:id/executor`, (req, res) => {
-    const session = authenticate(req, res, db, config);
+    const session = authenticate(req, res, db, config, true);
     if (!session) return;
     const conversation = db.getConversationForUser(String(req.params.id), session.user_id);
     if (!conversation) return res.status(404).json({ error: "会话不存在。" });
@@ -137,7 +137,7 @@ function verifyWriteRequest(req: Request, res: Response, session: SessionRow): b
   }
   const origin = req.get("origin");
   if (!origin) return true;
-  const expectedHost = String(req.headers["x-forwarded-host"] ?? req.get("host") ?? "").split(",")[0].trim();
+  const expectedHost = String(req.get("host") ?? "").trim();
   try {
     if (new URL(origin).host === expectedHost) return true;
   } catch { /* Fall through to the same untrusted-origin response. */ }
@@ -153,9 +153,7 @@ export function executorCanChange(db: AppDatabase, conversationId: string, threa
     activeJobCount: db.listActiveJobsForConversation(conversationId).length,
     queuedPromptCount: db.listPendingPrompts(conversationId).length,
     editingPromptCount: db.listPendingPrompts(conversationId, "editing").length,
-    // Text and quote drafts are executor-independent. Attachments are not,
-    // because the first remote transport intentionally does not stage uploads.
-    draftFileCount: draft?.files.length ?? 0,
+    hasSavedDraft: Boolean(draft),
   });
 }
 

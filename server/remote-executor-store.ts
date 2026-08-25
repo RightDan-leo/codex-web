@@ -10,20 +10,7 @@ function sameTarget(left: ExecutorTarget, right: ExecutorTarget): boolean {
 }
 
 export class RemoteExecutorStore {
-  constructor(private readonly db: AppDatabase) {
-    this.db.sqlite.exec(`
-      CREATE TABLE IF NOT EXISTS conversation_executors (
-        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
-        kind TEXT NOT NULL CHECK(kind IN ('tenant','remote')),
-        project_id TEXT,
-        updated_at TEXT NOT NULL,
-        CHECK(
-          (kind='tenant' AND project_id IS NULL)
-          OR (kind='remote' AND project_id IS NOT NULL)
-        )
-      );
-    `);
-  }
+  constructor(private readonly db: AppDatabase) {}
 
   get(conversationId: string): StoredExecutorTarget {
     const row = this.db.sqlite.prepare(`

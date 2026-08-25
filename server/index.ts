@@ -3,41 +3,11 @@ import path from "node:path";
 import pino from "pino";
 import { createApp } from "./app.js";
 import { assertProductionConfig } from "./config.js";
-import { installRemoteExecutorApiRoutes } from "./remote-executor-api.js";
-import { RemoteExecutorStore } from "./remote-executor-store.js";
-import { installRemoteRunnerRouting } from "./remote-runner-routing.js";
-import { RemoteWorkerGateway } from "./remote-worker-gateway.js";
-import { installRemoteWorkerHttpRoutes } from "./remote-worker-http.js";
-import { ensureTenantWorkspace } from "./paths.js";
 
-const { app, db, config, runner, beginShutdown } = createApp();
+const { app, db, config, runner, remoteWorkerService, beginShutdown } = createApp();
 assertProductionConfig(config);
 fs.mkdirSync(path.join(config.dataRoot, "logs"), { recursive: true });
 const logger = pino(pino.destination({ dest: path.join(config.dataRoot, "logs", "app.log"), sync: false }));
-
-// Keep one gateway even when the transport is disabled. Persisted remote
-// conversations then fail closed as offline instead of silently falling back
-// to the tenant workspace after REMOTE_WORKER_TOKEN is removed.
-const remoteWorkerGateway = new RemoteWorkerGateway();
-const remoteWorkerToken = process.env.REMOTE_WORKER_TOKEN ?? "";
-const remoteWorkerService = remoteWorkerToken
-  ? installRemoteWorkerHttpRoutes(app, {
-      token: remoteWorkerToken,
-      path: process.env.REMOTE_WORKER_PATH || "/codex-worker",
-      gateway: remoteWorkerGateway,
-    })
-  : undefined;
-const remoteExecutorStore = new RemoteExecutorStore(db);
-const remoteRunnerRouting = installRemoteRunnerRouting(runner, db, {
-  store: remoteExecutorStore,
-  gateway: remoteWorkerGateway,
-  workspaceForConversation: (conversationId, userId) => ensureTenantWorkspace(config.tenantRoot, userId, conversationId),
-});
-installRemoteExecutorApiRoutes(app, db, config, {
-  store: remoteExecutorStore,
-  gateway: remoteWorkerGateway,
-  remoteEnabled: Boolean(remoteWorkerService),
-});
 
 const server = app.listen(config.port, config.host, () => {
   logger.info({
@@ -65,10 +35,8 @@ async function shutdown(signal: string): Promise<void> {
     logger.error({ remainingJobs, activeExecutions: runner.activeJobCount }, "Shutdown drain timed out");
     process.exit(1);
   }
-  // Once every in-flight job has drained, restore the original runner methods
-  // and then disconnect workers. Doing this before the drain would turn a
-  // graceful container stop into an avoidable remote-task cancellation.
-  remoteRunnerRouting.close();
+  // Keep the worker transport alive until all local and remote jobs drain.
+  runner.close();
   remoteWorkerService?.close();
   logger.info("Running jobs drained; closing network services");
   server.close(() => {

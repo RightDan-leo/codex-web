@@ -18,9 +18,9 @@ test("conversation executor defaults to tenant and persists remote selection", (
     db.createConversation("00000000-0000-4000-8000-000000000010", "test");
     const store = new RemoteExecutorStore(db);
     assert.deepEqual(store.get("00000000-0000-4000-8000-000000000010"), { kind: "tenant" });
-    const remote = store.set("00000000-0000-4000-8000-000000000010", { kind: "remote", projectId: "magic-zombie" });
+    const remote = store.set("00000000-0000-4000-8000-000000000010", { kind: "remote", projectId: "sample-project" });
     assert.equal(remote.kind, "remote");
-    if (remote.kind === "remote") assert.equal(remote.projectId, "magic-zombie");
+    if (remote.kind === "remote") assert.equal(remote.projectId, "sample-project");
     const tenant = store.set("00000000-0000-4000-8000-000000000010", { kind: "tenant" });
     assert.equal(tenant.kind, "tenant");
   } finally {
@@ -50,6 +50,22 @@ test("executor rows are removed when their conversation is deleted", () => {
     const store = new RemoteExecutorStore(db);
     store.set(conversationId, { kind: "remote", projectId: "project-a" });
     db.sqlite.prepare("DELETE FROM conversations WHERE id=?").run(conversationId);
+    const row = db.sqlite.prepare("SELECT 1 AS found FROM conversation_executors WHERE conversation_id=?").get(conversationId);
+    assert.equal(row, undefined);
+  } finally {
+    db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executor rows are removed when a conversation is soft deleted", () => {
+  const { root, db } = createDb();
+  try {
+    const conversationId = "00000000-0000-4000-8000-000000000013";
+    db.createConversation(conversationId, "test");
+    const store = new RemoteExecutorStore(db);
+    store.set(conversationId, { kind: "remote", projectId: "project-a" });
+    db.softDeleteConversation(conversationId);
     const row = db.sqlite.prepare("SELECT 1 AS found FROM conversation_executors WHERE conversation_id=?").get(conversationId);
     assert.equal(row, undefined);
   } finally {

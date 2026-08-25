@@ -207,6 +207,16 @@ export class AppDatabase {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS conversation_executors (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK(kind IN ('tenant','remote')),
+        project_id TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK(
+          (kind='tenant' AND project_id IS NULL)
+          OR (kind='remote' AND project_id IS NOT NULL)
+        )
+      );
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -478,7 +488,15 @@ export class AppDatabase {
 
   softDeleteConversation(id: string): void {
     const now = new Date().toISOString();
-    this.sqlite.prepare("UPDATE conversations SET status='idle',deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL").run(now, now, id);
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      this.sqlite.prepare("DELETE FROM conversation_executors WHERE conversation_id=?").run(id);
+      this.sqlite.prepare("UPDATE conversations SET status='idle',deleted_at=?,updated_at=? WHERE id=? AND deleted_at IS NULL").run(now, now, id);
+      this.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   isCodexThreadUsedByAnotherActiveConversation(threadId: string, conversationId: string): boolean {
