@@ -186,7 +186,14 @@ export class RemoteWorkerRuntime {
       return;
     }
     try {
-      await active.execution.steer(prompt);
+      const turnId = await active.execution.steer(prompt);
+      emit({
+        type: "worker.steered",
+        protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
+        requestId,
+        jobId,
+        ...(typeof turnId === "string" && turnId ? { turnId } : {}),
+      });
     } catch (error) {
       emit({
         type: "worker.error",
