@@ -12,7 +12,7 @@ docker compose logs --tail=200 app
 curl --fail http://127.0.0.1:37821/codex-web/api/health
 ```
 
-Back up all three named volumes before upgrades. Keep `app.env` outside source control. Reserve `.env` for non-secret Docker Compose interpolation settings only.
+Back up all three named volumes before upgrades. Keep `app.env` outside source control. Reserve `.env` for non-secret Docker Compose interpolation settings only. On Linux, protect application secrets with `chown root:10001 app.env` and `chmod 0640 app.env`; the fixed container web process uses group 10001.
 
 Docker grants the application up to 30 minutes after `SIGTERM` to drain active Codex work. New dispatch stops immediately, queued jobs stay persisted, and the container exits once active executions finish. Avoid overriding `stop_grace_period` with a shorter value unless you accept interrupted jobs.
 

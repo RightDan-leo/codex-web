@@ -172,6 +172,8 @@ For the public build, the web process has no Docker socket, host filesystem moun
 
    Docker Compose automatically parses a file named `.env`, including `$` characters in bcrypt hashes. Keeping application secrets in `app.env` prevents those values from being interpolated or echoed as Compose warnings. Use `.env` only for optional Compose settings such as `CODEX_WEB_PORT`, `CODEX_WEB_MEMORY_LIMIT`, `CODEX_WEB_CPU_LIMIT`, and `TZ`.
 
+   On a Linux production host, keep the file readable only by root and the fixed web-process group: `sudo chown root:10001 app.env && sudo chmod 0640 app.env`. Docker Desktop users can keep the platform-managed file permissions.
+
 4. Build and start the service:
 
    ```bash

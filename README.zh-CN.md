@@ -14,7 +14,7 @@ npm ci
 npm run hash-password -- '请设置一个至少十二位的独立密码'
 ```
 
-把生成的哈希填入 `app.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。Docker Compose 会自动解析名为 `.env` 的文件，bcrypt 哈希中的 `$` 可能因此被当成变量并出现在警告日志里；应用密钥单独放在 `app.env` 可以避免这种插值。`.env` 只用于可选的 Compose 设置，例如端口、CPU、内存上限和时区。然后执行：
+把生成的哈希填入 `app.env` 的 `APP_PASSWORD_HASH`，并设置至少 32 个字符的随机 `SESSION_SECRET`。Docker Compose 会自动解析名为 `.env` 的文件，bcrypt 哈希中的 `$` 可能因此被当成变量并出现在警告日志里；应用密钥单独放在 `app.env` 可以避免这种插值。`.env` 只用于可选的 Compose 设置，例如端口、CPU、内存上限和时区。在 Linux 生产主机上执行 `sudo chown root:10001 app.env && sudo chmod 0640 app.env`，让它仅对 root 和容器内固定 Web 进程组可读；Docker Desktop 可以继续使用平台管理的文件权限。然后执行：
 
 ```bash
 docker compose up -d --build
