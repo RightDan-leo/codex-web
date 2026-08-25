@@ -1,5 +1,6 @@
 import {
   REMOTE_WORKER_PROTOCOL_VERSION,
+  type RemoteAttachmentPayload,
   type ServerCancelMessage,
   type ServerRunMessage,
   type ServerSteerMessage,
@@ -22,6 +23,7 @@ export type RemoteRunInput = {
   codexThreadId?: string;
   model?: string;
   reasoningEffort?: string;
+  attachments?: RemoteAttachmentPayload[];
 };
 
 export type RemoteRunCallbacks = {
@@ -122,6 +124,10 @@ export class RemoteWorkerGateway {
     if (!workerId) throw new Error(`No online remote worker provides project: ${input.projectId}`);
     const session = this.workers.get(workerId);
     if (!session) throw new Error(`Remote worker is offline: ${workerId}`);
+    const attachments = input.attachments ?? [];
+    if (attachments.length > 0 && session.hello.capabilities.supportsAttachments !== true) {
+      throw new Error("Remote worker does not support attachment staging; update and restart the worker");
+    }
 
     const requestId = this.nextRequestId(input.jobId);
     const message: ServerRunMessage = {
@@ -134,6 +140,7 @@ export class RemoteWorkerGateway {
       ...(input.codexThreadId ? { codexThreadId: input.codexThreadId } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
     };
 
     let resolve!: (value: string) => void;
