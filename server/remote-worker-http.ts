@@ -7,6 +7,7 @@ export type RemoteWorkerHttpOptions = {
   token: string;
   path?: string;
   sessionTtlMs?: number;
+  gateway?: RemoteWorkerGateway;
 };
 
 export type RemoteWorkerHttpService = {
@@ -37,7 +38,7 @@ export function installRemoteWorkerHttpRoutes(
 ): RemoteWorkerHttpService {
   if (options.token.length < 32) throw new Error("REMOTE_WORKER_TOKEN must contain at least 32 characters");
   const mountPath = normalizeMountPath(options.path ?? "/codex-worker");
-  const gateway = new RemoteWorkerGateway();
+  const gateway = options.gateway ?? new RemoteWorkerGateway();
   const hub = new RemoteWorkerPollingHub(gateway, { sessionTtlMs: options.sessionTtlMs });
   let closed = false;
 
