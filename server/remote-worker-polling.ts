@@ -109,6 +109,10 @@ export class RemoteWorkerPollingHub {
     this.gateway.detach(session.workerId, reason);
   }
 
+  closeAll(reason = "remote worker polling service closed"): void {
+    for (const sessionId of [...this.sessions.keys()]) this.close(sessionId, reason);
+  }
+
   sweepIdle(): number {
     const deadline = this.now() - this.sessionTtlMs;
     let removed = 0;
