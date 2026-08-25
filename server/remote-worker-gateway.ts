@@ -179,8 +179,7 @@ export class RemoteWorkerGateway {
     const message: WorkerToServerMessage = validateWorkerMessage(rawMessage);
     if (message.type === "worker.ready" || message.type === "worker.pong") return;
 
-    const pending = this.pendingByRequest.get(message.requestId)
-      ?? ("jobId" in message && message.jobId ? this.pendingByJob.get(message.jobId) : undefined);
+    const pending = this.pendingByRequest.get(message.requestId);
     if (!pending) return;
     if (pending.workerId !== workerId) throw new Error("Remote worker attempted to answer another worker's request");
 
