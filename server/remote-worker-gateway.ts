@@ -31,7 +31,7 @@ export type RemoteRunCallbacks = {
 
 export type RemoteRunExecution = {
   result: Promise<string>;
-  steer(prompt: string): Promise<void>;
+  steer(prompt: string): Promise<string>;
   interrupt(): void;
 };
 
@@ -50,6 +50,14 @@ type PendingRun = {
   callbacks: RemoteRunCallbacks;
 };
 
+type PendingCommand = {
+  requestId: string;
+  jobId: string;
+  workerId: string;
+  resolve(value: string): void;
+  reject(error: Error): void;
+};
+
 export type RemoteWorkerStatus = {
   workerId: string;
   displayName: string;
@@ -62,6 +70,7 @@ export class RemoteWorkerGateway {
   private readonly projectOwners = new Map<string, string>();
   private readonly pendingByRequest = new Map<string, PendingRun>();
   private readonly pendingByJob = new Map<string, PendingRun>();
+  private readonly pendingCommands = new Map<string, PendingCommand>();
   private requestSequence = 0;
 
   attach(rawHello: unknown, transport: RemoteWorkerTransport): RemoteWorkerStatus {
@@ -91,6 +100,11 @@ export class RemoteWorkerGateway {
       if (pending.workerId !== workerId) continue;
       this.removePending(pending);
       pending.reject(new Error(reason));
+    }
+    for (const command of [...this.pendingCommands.values()]) {
+      if (command.workerId !== workerId) continue;
+      this.pendingCommands.delete(command.requestId);
+      command.reject(new Error(reason));
     }
   }
 
@@ -141,20 +155,40 @@ export class RemoteWorkerGateway {
 
     return {
       result,
-      steer: async (prompt: string) => {
+      steer: (prompt: string) => {
         const current = this.pendingByJob.get(input.jobId);
-        if (!current) throw new Error("Remote job is no longer running");
+        if (!current) return Promise.reject(new Error("Remote job is no longer running"));
         const activeSession = this.workers.get(current.workerId);
-        if (!activeSession) throw new Error("Remote worker is offline");
-        if (!activeSession.hello.capabilities.supportsSteering) throw new Error("Remote worker does not support steering");
+        if (!activeSession) return Promise.reject(new Error("Remote worker is offline"));
+        if (!activeSession.hello.capabilities.supportsSteering) return Promise.reject(new Error("Remote worker does not support steering"));
+        const steerRequestId = this.nextRequestId(input.jobId);
         const steer: ServerSteerMessage = {
           type: "server.steer",
           protocolVersion: REMOTE_WORKER_PROTOCOL_VERSION,
-          requestId: this.nextRequestId(input.jobId),
+          requestId: steerRequestId,
           jobId: input.jobId,
           prompt,
         };
-        activeSession.transport.send(steer);
+        let resolveSteer!: (value: string) => void;
+        let rejectSteer!: (error: Error) => void;
+        const accepted = new Promise<string>((resolveCommand, rejectCommand) => {
+          resolveSteer = resolveCommand;
+          rejectSteer = rejectCommand;
+        });
+        this.pendingCommands.set(steerRequestId, {
+          requestId: steerRequestId,
+          jobId: input.jobId,
+          workerId: current.workerId,
+          resolve: resolveSteer,
+          reject: rejectSteer,
+        });
+        try {
+          activeSession.transport.send(steer);
+        } catch (error) {
+          this.pendingCommands.delete(steerRequestId);
+          rejectSteer(error instanceof Error ? error : new Error(String(error)));
+        }
+        return accepted;
       },
       interrupt: () => {
         const current = this.pendingByJob.get(input.jobId);
@@ -179,6 +213,19 @@ export class RemoteWorkerGateway {
     const message: WorkerToServerMessage = validateWorkerMessage(rawMessage);
     if (message.type === "worker.ready" || message.type === "worker.pong") return;
 
+    const command = this.pendingCommands.get(message.requestId);
+    if (command) {
+      if (command.workerId !== workerId) throw new Error("Remote worker attempted to answer another worker's command");
+      if (message.type === "worker.steered") {
+        this.pendingCommands.delete(command.requestId);
+        command.resolve(message.turnId || `remote:${command.jobId}:${command.requestId}`);
+      } else if (message.type === "worker.error") {
+        this.pendingCommands.delete(command.requestId);
+        command.reject(new Error(message.message));
+      }
+      return;
+    }
+
     const pending = this.pendingByRequest.get(message.requestId);
     if (!pending) return;
     if (pending.workerId !== workerId) throw new Error("Remote worker attempted to answer another worker's request");
@@ -202,12 +249,19 @@ export class RemoteWorkerGateway {
         this.removePending(pending);
         pending.reject(new Error("Remote job was cancelled"));
         return;
+      case "worker.steered":
+        return;
     }
   }
 
   private removePending(pending: PendingRun): void {
     this.pendingByRequest.delete(pending.requestId);
     if (this.pendingByJob.get(pending.jobId) === pending) this.pendingByJob.delete(pending.jobId);
+    for (const command of [...this.pendingCommands.values()]) {
+      if (command.jobId !== pending.jobId) continue;
+      this.pendingCommands.delete(command.requestId);
+      command.reject(new Error("Remote job is no longer running"));
+    }
   }
 
   private nextRequestId(jobId: string): string {
