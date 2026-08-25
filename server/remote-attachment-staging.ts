@@ -91,7 +91,11 @@ export function stageRemoteAttachments(
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    try { fs.rmSync(runtimeRoot, { recursive: true, force: true }); }
+    catch {
+      // Windows scanners or a late child-process handle can temporarily keep a
+      // file open. A stale directory is harmless and is pruned on next startup.
+    }
   };
 
   try {
