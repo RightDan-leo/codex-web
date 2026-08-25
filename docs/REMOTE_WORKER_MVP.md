@@ -10,8 +10,10 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 4. A worker can only answer jobs routed to that worker.
 5. Duplicate project ids across connected workers are rejected.
 6. Disconnecting a worker rejects its in-flight runs instead of silently retrying side-effecting work.
-7. The shared worker token is read from the process environment and is not stored in the worker JSON config.
-8. Non-local worker connections require HTTPS.
+7. The shared worker token is read from the process environment, is not stored in the worker JSON config, and is removed from the Codex app-server environment.
+8. Shell commands started by the remote Codex process receive only an allowlisted environment, not arbitrary worker-process secrets.
+9. Non-local worker connections require HTTPS.
+10. A persisted remote conversation fails closed when its worker is offline; it never silently falls back to the tenant workspace.
 
 ## Implemented in this slice
 
@@ -19,12 +21,15 @@ This extension lets Codex Web route trusted work to an explicitly registered pro
 - Online worker/project registry and transport-independent gateway.
 - Run, progress, thread-started, steering, cancellation, result, and error routing.
 - Worker runtime that maps registered project ids to real local workspaces.
-- Executor routing seam between existing tenant execution and remote execution.
-- Adapter from `RemoteWorkerRuntime` to the existing `startAppServerTurn` implementation.
 - Dependency-free outbound long-poll transport; the worker opens no inbound port.
 - Bearer-token protected `/codex-worker` management channel, disabled when `REMOTE_WORKER_TOKEN` is empty.
 - Remote worker CLI and strict local JSON configuration loader.
-- Unit/integration coverage for routing, path isolation, polling lifecycle, HTTP authentication, config validation, cancellation, and steering-error isolation.
+- Persistent per-conversation executor target stored in SQLite.
+- Routing of run, thread resume, progress, steering, cancellation, shutdown draining, and completion through the selected executor.
+- Owner-authenticated worker status and executor-selection API with CSRF and origin checks.
+- Web selector for choosing the isolated tenant or an online remote project on a blank new task.
+- Offline status in the web selector for a previously selected remote project.
+- Unit and integration coverage for routing, path isolation, polling lifecycle, HTTP authentication, config validation, cancellation, steering, fail-closed behavior, executor selection, and secret isolation.
 
 The transport is intentionally behind an interface. A future WSS transport can replace long polling without changing the executor, gateway, or local runtime layers.
 
@@ -37,7 +42,7 @@ REMOTE_WORKER_TOKEN=replace-with-a-long-random-secret
 REMOTE_WORKER_PATH=/codex-worker
 ```
 
-If `REMOTE_WORKER_TOKEN` is empty, the remote worker channel is not mounted.
+If `REMOTE_WORKER_TOKEN` is empty, the worker transport is not mounted. Existing conversations that target a remote project remain remote and report that the project is offline instead of falling back to the server tenant.
 
 For a public deployment, configure the HTTPS reverse proxy to forward `/codex-worker/` to the same Codex Web process. The polling request can remain open for roughly 25 seconds, so response buffering should be disabled and the proxy read timeout should be comfortably longer than that.
 
@@ -77,15 +82,24 @@ npm run remote-worker -- .\remote-worker.json
 
 The worker actively registers and polls the server. It never accepts a server-supplied filesystem path and it does not expose a shell, remote desktop port, or generic tunnel.
 
-## Not wired into the web product yet
+## Selecting a remote project
 
-The transport and local execution path are implemented, but normal Codex Web conversations still use the tenant executor. The next integration slice is deliberately separate so the existing queue remains safe while the data model changes.
+1. Start the server and at least one trusted worker.
+2. In Codex Web, click **New task** so the blank conversation is selected.
+3. Use the execution-position control above the composer.
+4. Keep **Isolated workspace** for the existing Docker tenant, or select an online remote project.
+5. Send the first prompt. The selection is then locked for that conversation.
 
-Remaining product integration:
+The selector is deliberately immutable after the conversation has a message, Codex thread, draft attachment, queued prompt, or active job. This avoids continuing one thread against two unrelated filesystems.
 
-- Persist each conversation's executor target (`tenant` or a remote `projectId`) in SQLite.
-- Route `CodexRunner.run`, steering, cancellation, and thread state through the selected executor.
-- Expose authenticated worker/project status to the owner UI.
-- Add an explicit project selector and clear offline state in the web UI.
-- Stage attachments for remote jobs with explicit limits and cleanup rules.
-- Decide whether remote-generated deliverables are copied back to server storage or remain project files.
+A remote project can go offline after selection. The UI marks it offline, and new work for that conversation fails clearly until the same logical project id reconnects.
+
+## Current MVP limits
+
+- Conversation attachments are not staged to a remote worker. Put required files inside the registered project directory before sending the task.
+- Files generated inside a remote project remain on that computer. They are not yet copied into Codex Web's durable deliverable store.
+- Sending directly from the initial welcome screen still creates and submits a tenant conversation immediately. Create a blank task first when remote execution is required.
+- The management transport currently uses authenticated outbound long polling rather than WSS.
+- Worker provisioning and token rotation are manual.
+
+The next integration slice should add explicit attachment staging, result synchronization with size and path limits, worker enrollment/rotation, and end-to-end deployment tests on both Windows and macOS.
