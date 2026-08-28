@@ -1,8 +1,10 @@
 import readline from "node:readline";
+import crypto from "node:crypto";
 import { startTenantTurn, validateTenantWorkerRequest } from "./tenant-worker-execution.js";
 import type { AppServerTurnExecution } from "./app-server-turn.js";
 import type { TenantWorkerEvent, TenantWorkerInput } from "./tenant-worker-protocol.js";
 import { cleanupJobRuntime } from "./python-runtime.js";
+import { dynamicToolFailure, type DynamicToolExecutionResult } from "./app-server-dynamic-tools.js";
 
 const expectedUserId = process.env.CWW_TENANT_USER_ID ?? "";
 const expectedTenantRoot = process.env.CWW_TENANT_ROOT ?? "";
@@ -11,6 +13,7 @@ const expectedGid = Number(process.env.CWW_TENANT_GID ?? "NaN");
 const controller = new AbortController();
 let started = false;
 let activeExecution: AppServerTurnExecution | null = null;
+const pendingTools = new Map<string, { resolve(result: DynamicToolExecutionResult): void; timer: ReturnType<typeof setTimeout> }>();
 
 function send(event: TenantWorkerEvent): void {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -42,6 +45,14 @@ input.on("line", (line) => {
     );
     return;
   }
+  if (message.type === "tool_result") {
+    const pending = pendingTools.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingTools.delete(message.requestId);
+    pending.resolve(message.result);
+    return;
+  }
   if (message.type !== "run" || started) return;
   started = true;
   void (async () => {
@@ -58,6 +69,15 @@ input.on("line", (line) => {
         onContextUsage: (usage) => send({ type: "context_usage", usage }),
         onQuotaUsage: (usage) => send({ type: "quota_usage", usage }),
         onProgress: (payload) => send({ type: "progress", payload }),
+        onDynamicToolCall: (call) => new Promise((resolve) => {
+          const requestId = crypto.randomUUID();
+          const timer = setTimeout(() => {
+            pendingTools.delete(requestId);
+            resolve(dynamicToolFailure("智能看板操作等待主服务响应超时。"));
+          }, 30_000);
+          pendingTools.set(requestId, { resolve, timer });
+          send({ type: "dynamic_tool_call", requestId, call });
+        }),
       });
       const finalResponse = await activeExecution.result;
       terminalEvent = { type: "completed", finalResponse };
@@ -71,6 +91,11 @@ input.on("line", (line) => {
       };
       process.exitCode = cancelled ? 0 : 1;
     } finally {
+      for (const [requestId, pending] of pendingTools) {
+        clearTimeout(pending.timer);
+        pending.resolve(dynamicToolFailure("任务已经结束，智能看板操作未执行。"));
+        pendingTools.delete(requestId);
+      }
       activeExecution = null;
       cleanupJobRuntime(message.request.runtimeRoot);
       send(terminalEvent!);

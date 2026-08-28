@@ -4,7 +4,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Archive, ArrowLeft, ArrowUp, BookOpen, Bot, Check, ChevronDown, CircleAlert, CircleDashed, Clock, Download, Eye, File as FileIcon, FileImage, FileText, Folder, FolderArchive, FolderOpen, Gauge, HardDrive,
-  Copy, CornerUpLeft, GripVertical, KeyRound, LoaderCircle, LogOut, Menu, Mic, Minus, Monitor, MonitorUp, Moon, MoreHorizontal, Paperclip, Pause, Pencil, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Share2, Square, SquarePen, Sun,
+  Copy, CornerUpLeft, GripVertical, KeyRound, LayoutGrid, LoaderCircle, LogOut, Menu, Mic, Minus, Monitor, MonitorUp, Moon, MoreHorizontal, Paperclip, Pause, Pencil, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Search, Settings2, Share2, Square, SquarePen, Sun,
   Trash2, X, Zap,
 } from "lucide-react";
 import { api, BASE_PATH, fileThumbnailUrl, fileUrl, isApiErrorStatus, resumableUploadEndpoint, resumableUploadHeaders, setCsrf, type AgentOptions, type ComposerDraft, type Conversation, type ConversationActivity, type ConversationDetail, type ConversationPage, type DeploymentPhase, type DeploymentStatus, type Executor, type FileShareState, type Job, type JobEvent, type MaintenancePhase, type PendingPrompt, type Project, type ProjectDirectoryPage, type ReaderAnnotation, type ReasoningEffort, type RemoteWorkerBootstrap, type Session, type SystemStatus, type WakePlan, type WorkFile } from "./api";
@@ -26,6 +26,7 @@ import { resetProjectConversationPage } from "./project-conversation-page";
 import { formatContextUsage, formatRolloutBytes, ROLLOUT_WARNING_BYTES, shouldWarnAboutRollout } from "./rollout-capacity";
 import { conversationProjectMoveBlockReason, type ConversationProjectDrag } from "./conversation-project-move";
 import { formatRemoteWorkerCapacity } from "./remote-worker-capacity";
+import { TaskboardPage } from "./TaskboardPage";
 import { recoverBrowserSession } from "./session-recovery";
 import { mergeConversationMatches, removeConversationFromPage, retainSelectedConversation, sortConversationsByActivity } from "./conversation-search";
 import { buildHandoffFirstTurn, CONTEXT_HANDOFF_PROMPT, latestContextHandoff } from "./context-handoff";
@@ -892,6 +893,7 @@ function SearchVoiceInput({ query, projectId, disabled = false, onTranscript }: 
 }
 
 function Workspace({ session, onLogout, themePreference, onThemePreferenceChange }: { session: Session; onLogout: () => void; themePreference: ThemePreference; onThemePreferenceChange: (preference: ThemePreference) => void }) {
+  const [workspaceView, setWorkspaceView] = useState<"chat" | "taskboard">("chat");
   const selectionStorageKeys = useMemo(() => accountSelectionStorageKeys(session.accountId!), [session.accountId]);
   const savedProjectIdRef = useRef(readStoredSelection(window.localStorage, selectionStorageKeys.project));
   const savedConversationIdRef = useRef(readStoredSelection(window.localStorage, selectionStorageKeys.conversation));
@@ -1960,6 +1962,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
   }
 
   function selectProjectConversation(projectId: string, conversationId: string) {
+    setWorkspaceView("chat");
     const conversation = projectConversationPagesRef.current[projectId]?.conversations.find((item) => item.id === conversationId);
     if (conversation) retainedConversationRef.current = conversation;
     if (projectId !== activeProjectIdRef.current) {
@@ -1982,6 +1985,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
   }
 
   function selectConversation(conversation: Conversation) {
+    setWorkspaceView("chat");
     retainedConversationRef.current = conversation;
     selectedIdRef.current = conversation.id;
     setSelectedId(conversation.id);
@@ -2578,6 +2582,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
   }, [refreshDetail, refreshList]);
 
   async function newConversation(projectId = activeProjectIdRef.current ?? undefined) {
+    setWorkspaceView("chat");
     const creationKey = projectId ?? "__default__";
     if (creatingConversationProjectsRef.current.has(creationKey)) return;
     creatingConversationProjectsRef.current.add(creationKey);
@@ -3322,6 +3327,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
         <div className="wordmark"><span className="brand-mark small"><Zap size={15} /></span><span className="brand-copy"><strong>Codex Web</strong><small>PERSONAL AI WORKSTATION</small></span></div>
         <button className="icon-button mobile-only" onClick={() => setSidebarOpen(false)} aria-label="关闭"><X size={19} /></button>
       </div>
+      <button type="button" className={`taskboard-sidebar-button ${workspaceView === "taskboard" ? "active" : ""}`} onClick={() => { setWorkspaceView("taskboard"); setSidebarOpen(false); }}><LayoutGrid size={16} />智能项目看板</button>
       <div className="search-box"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索任务" /><SearchVoiceInput query={query} projectId={activeProjectId} disabled={conversationListLoading} onTranscript={(text) => setQuery((current) => current ? `${current} ${text}` : text)} /></div>
       <div className="conversation-section">
         {session.projectMode && <div className="project-section">
@@ -3512,7 +3518,7 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
     {publicSharesDialogOpen && <PublicSharesDialog onClose={() => setPublicSharesDialogOpen(false)} />}
     {accountAuthDialogOpen && createPortal(<AccountAuthDialog onClose={() => setAccountAuthDialogOpen(false)} />, document.body)}
 
-    <main className={`workspace ${currentDetail?.pendingPrompts.length ? "has-pending-queue" : ""}`}>
+    <main className={`workspace ${workspaceView === "chat" && currentDetail?.pendingPrompts.length ? "has-pending-queue" : ""}`}>
       <header className="workspace-header">
         <div className="workspace-header-start"><button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={20} /></button><div className="wordmark workspace-context" title={`${workspaceTitle} · ${workspaceSubtitle}`}><span className="brand-mark small">{selectedProject?.executor_id.startsWith("remote:") ? <Monitor size={15} /> : selectedProject ? <Folder size={15} /> : <Zap size={14} />}</span><span className="brand-copy workspace-context-copy"><strong>{workspaceTitle}{maintenancePhase !== "idle" && <span className="maintenance-state" role="status" aria-live="polite" title={maintenanceStatus?.message ?? undefined}>（<span className="maintenance-label">{maintenanceStatusLabel(maintenancePhase, maintenanceStatus)}</span> <LoaderCircle className="spin" size={11} />）</span>}</strong><small>{workspaceSubtitle}</small></span></div>{maintenanceStatus?.deployment && <details className={`deployment-status deployment-status-${deploymentStatusTone(maintenanceStatus.deployment)}`} role="status"><summary title={maintenanceStatus.deployment.message}><span className="deployment-status-dot" aria-hidden="true" /><span className="deployment-status-copy"><strong>发布 {deploymentStageNumber(maintenanceStatus.deployment.phase)}/{DEPLOYMENT_STAGES.length}</strong><small>{deploymentPhaseLabel(maintenanceStatus.deployment)}</small></span>{deploymentStatusTone(maintenanceStatus.deployment) === "active" && <LoaderCircle className="spin" size={13} />}{maintenanceStatus.deployment.requestId !== null && <span className="deployment-request">#{maintenanceStatus.deployment.requestId}</span>}</summary><div className="deployment-status-panel"><div className="deployment-status-heading"><strong>{maintenanceStatus.deployment.message}</strong>{maintenanceStatus.deployment.targetSha && <code title={maintenanceStatus.deployment.targetSha}>{maintenanceStatus.deployment.targetSha.slice(0, 7)}</code>}</div><ol>{DEPLOYMENT_STAGES.map((stage, index) => { const current = deploymentStageNumber(maintenanceStatus.deployment!.phase); const history = maintenanceStatus.deployment!.phaseHistory ?? []; const visited = history.some((entry) => entry.phase === stage.phase); const done = maintenanceStatus.deployment!.phase === "deployed" || index + 1 < current || (visited && stage.phase !== maintenanceStatus.deployment!.phase); const failed = !done && ["failed", "conflict", "deferred"].includes(maintenanceStatus.deployment!.phase) && index + 1 === current; return <li key={stage.phase} className={`${done ? "done" : ""} ${failed ? "failed" : ""} ${!done && !failed && index + 1 === current ? "current" : ""}`}><span aria-hidden="true" />{stage.label}</li>; })}</ol>{maintenanceStatus.deployment.errorSummary && <p className="deployment-status-error">{maintenanceStatus.deployment.errorSummary}</p>}</div></details>}</div>
         <div className="workspace-header-actions">
@@ -3555,13 +3561,14 @@ function Workspace({ session, onLogout, themePreference, onThemePreferenceChange
           </details> : <button className="icon-button" aria-label="会话操作" title="请先选择会话" disabled><MoreHorizontal size={21} /></button>}
         </div>
       </header>
-      {currentDetail ? <Chat detail={currentDetail} activities={activities} activitiesLoading={activitiesLoading} sending={sending} loadingOlderMessages={loadingOlderMessages} messagesRef={messagesRef} onMessagesScroll={handleMessagesScroll} onAskAgent={askAgentAbout} onFetchRemoteFile={fetchRemoteMessageFile} remoteFileFetchEnabled={remoteFileFetchEnabled} userInitials={account.initials} chatFontSize={chatFontSize} onCancelWake={cancelWakePlan} onPostponeWake={postponeWakePlan} onTriggerWake={triggerWakePlan} onEditWake={() => openWakeDetails(currentDetail.conversation)} />
+      {workspaceView === "taskboard" ? <TaskboardPage onOpenConversation={(conversationId, draft) => { setInput(draft); selectedIdRef.current = conversationId; setSelectedId(conversationId); setWorkspaceView("chat"); setSidebarOpen(false); }} />
+        : currentDetail ? <Chat detail={currentDetail} activities={activities} activitiesLoading={activitiesLoading} sending={sending} loadingOlderMessages={loadingOlderMessages} messagesRef={messagesRef} onMessagesScroll={handleMessagesScroll} onAskAgent={askAgentAbout} onFetchRemoteFile={fetchRemoteMessageFile} remoteFileFetchEnabled={remoteFileFetchEnabled} userInitials={account.initials} chatFontSize={chatFontSize} onCancelWake={cancelWakePlan} onPostponeWake={postponeWakePlan} onTriggerWake={triggerWakePlan} onEditWake={() => openWakeDetails(currentDetail.conversation)} />
         : loadingConversation ? <ConversationLoading restoring={restoringConversationSelection} />
         : <Welcome onSuggestion={(text) => setInput(text)} />}
       {error && <div className="toast"><span>{error}</span>{cleanupRetry && <button type="button" onClick={() => void deleteConversation(cleanupRetry, true)}>重试清理</button>}<button onClick={() => { setError(""); setCleanupRetry(null); }}><X size={16} /></button></div>}
       {notice && <div className="toast info" role="status"><span>{notice}</span><button onClick={() => setNotice("")}><X size={16} /></button></div>}
-      {currentDetail?.conversation.archived_at && <div className="archived-conversation-banner"><Archive size={15} /><span>这是已归档会话，只读查看；消息、附件和 rollout 仍保存在原处。</span><button type="button" onClick={() => void restoreConversation(currentDetail.conversation)}>恢复</button></div>}
-      {conversationSelectionReady && (!selectedId || !selectedConversation?.archived_at) && <Composer accountId={session.accountId ?? null} input={input} setInput={setInput} askAgentQuote={askAgentQuote} onClearAskAgentQuote={() => setAskAgentQuote("")} focusRequest={composerFocusRequest} files={files} setFiles={setFiles} draftFiles={composerDraft?.files ?? []} draftUploads={draftUploads} draftSaveState={draftSaveState} sending={sending} submitting={submitting} selectionSaving={selectionSaving}
+      {workspaceView === "chat" && currentDetail?.conversation.archived_at && <div className="archived-conversation-banner"><Archive size={15} /><span>这是已归档会话，只读查看；消息、附件和 rollout 仍保存在原处。</span><button type="button" onClick={() => void restoreConversation(currentDetail.conversation)}>恢复</button></div>}
+      {workspaceView === "chat" && conversationSelectionReady && (!selectedId || !selectedConversation?.archived_at) && <Composer accountId={session.accountId ?? null} input={input} setInput={setInput} askAgentQuote={askAgentQuote} onClearAskAgentQuote={() => setAskAgentQuote("")} focusRequest={composerFocusRequest} files={files} setFiles={setFiles} draftFiles={composerDraft?.files ?? []} draftUploads={draftUploads} draftSaveState={draftSaveState} sending={sending} submitting={submitting} selectionSaving={selectionSaving}
         conversationId={selectedId}
         pendingPrompts={currentDetail?.pendingPrompts ?? []} editingPending={editingPending} removedEditingFileIds={removedEditingFileIds}
         agentOptions={agentOptions} selectedModel={selectedModel} reasoningEffort={reasoningEffort}

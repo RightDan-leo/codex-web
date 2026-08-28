@@ -5,6 +5,7 @@ import type { CodexEgressKind } from "./codex-egress.js";
 import type { CodexQuotaUsage, ContextTokenUsage } from "./app-server-turn.js";
 import type { CodexVoiceReviewRequest } from "./codex-voice-review.js";
 import type { ConversationTitleAgentRequest } from "./conversation-title.js";
+import type { DynamicToolCallRequest, DynamicToolExecutionResult, DynamicToolSpec } from "./app-server-dynamic-tools.js";
 
 export type TenantWorkerRunRequest = {
   jobId: string;
@@ -27,6 +28,7 @@ export type TenantWorkerRunRequest = {
   codexWindowsSandbox: "elevated" | "unelevated";
   optionalCapabilities: OptionalAgentCapabilities;
   automation?: { baseUrl: string; token: string; receiptDirectory: string };
+  dynamicTools?: DynamicToolSpec[];
   codexEgressKind?: CodexEgressKind;
 };
 
@@ -36,6 +38,7 @@ export type TenantWorkerEvent =
   | { type: "context_usage"; usage: ContextTokenUsage }
   | { type: "quota_usage"; usage: CodexQuotaUsage }
   | { type: "progress"; payload: unknown }
+  | { type: "dynamic_tool_call"; requestId: string; call: DynamicToolCallRequest }
   | { type: "steer_completed"; requestId: string; turnId: string }
   | { type: "steer_failed"; requestId: string; message: string }
   | { type: "completed"; finalResponse: string; omittedArtifacts?: Array<{
@@ -47,6 +50,7 @@ export type TenantWorkerEvent =
 export type WebToSupervisorMessage =
   | { kind: "tenant_run"; jobId: string; userId: string; request: TenantWorkerRunRequest }
   | { kind: "tenant_steer"; jobId: string; requestId: string; prompt: string; imagePaths: string[] }
+  | { kind: "tenant_tool_result"; jobId: string; requestId: string; result: DynamicToolExecutionResult }
   | { kind: "tenant_cancel"; jobId: string }
   | { kind: "tenant_runtime_cleanup"; requestId: string; targets: JobRuntimeCleanupTarget[] }
   | { kind: "tenant_voice_review"; requestId: string; request: CodexVoiceReviewRequest }
@@ -68,4 +72,5 @@ export type SupervisorToWebMessage =
 export type TenantWorkerInput =
   | { type: "run"; request: TenantWorkerRunRequest }
   | { type: "steer"; requestId: string; prompt: string; imagePaths: string[] }
+  | { type: "tool_result"; requestId: string; result: DynamicToolExecutionResult }
   | { type: "cancel" };

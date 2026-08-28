@@ -43,6 +43,9 @@ import { ReaderIngestError } from "./reader-ingest.js";
 import { parseReaderRange, ReaderRangeError } from "./reader-range.js";
 import { ReaderService, ReaderUnavailableError } from "./reader-service.js";
 import type { ReadingAnnotationType } from "./reader-types.js";
+import { installTaskboardApiRoutes } from "./taskboard-api.js";
+import { TaskboardStore } from "./taskboard-store.js";
+import { TaskboardAgentTools } from "./taskboard-agent-tools.js";
 
 const COOKIE_NAME = "cww_session";
 // Keep unknown-user login work comparable without using any real account hash.
@@ -208,11 +211,18 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     if (conversation.agent_model || conversation.reasoning_effort) conversationAgentSelection(conversation);
   }
 
+  const taskboardStore = new TaskboardStore(db);
+  const taskboardAgentTools = new TaskboardAgentTools(db, taskboardStore);
+
   function publish(jobId: string, eventType: string, payload: unknown): void {
     // Personal context is an internal model input. Never persist or stream a
     // reasoning/progress echo of it into the visible Codex Web conversation.
     if (containsPersonalContext(payload)) return;
     const seq = db.appendEvent(jobId, eventType, payload);
+    if (["done", "failed"].includes(eventType)) {
+      try { taskboardStore.settleTaskForJob(jobId); }
+      catch { /* Taskboard reconciliation must never change the primary job result. */ }
+    }
     const livePayload = {
       ...(payload && typeof payload === "object" ? payload : { payload }),
       created_at: new Date().toISOString(),
@@ -226,7 +236,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     }
   }
 
-  const runner = new CodexRunner(config, db, publish, remoteWorkers);
+  const runner = new CodexRunner(config, db, publish, remoteWorkers, taskboardAgentTools);
   const restoringConversations = new Map<string, Promise<void>>();
   function scheduleColdRestore(conversationId: string, userId: string): void {
     if (restoringConversations.has(conversationId)) return;
@@ -1858,6 +1868,17 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
   api.patch("/uploads/:id", (req, res) => resumableUploads.patch(req, res, res.locals.session as SessionRow));
   api.delete("/uploads/:id", (req, res) => resumableUploads.terminate(req, res, res.locals.session as SessionRow));
   api.get("/uploads/:id/result", (req, res) => resumableUploads.result(req, res, res.locals.session as SessionRow));
+
+  installTaskboardApiRoutes(api, taskboardStore, remoteWorkers, {
+    selectionForTask: (task, userId) => {
+      const conversation = task.conversation_id ? db.getConversationForUser(task.conversation_id, userId) : undefined;
+      return conversation ? conversationAgentSelection(conversation) : userAgentSelection(userId);
+    },
+    onJobQueued: () => {
+      publishQueuePositions();
+      if (config.queueAutoStart) setImmediate(() => void pumpQueue());
+    },
+  });
 
   api.post("/auth/logout", (req, res) => {
     const token = req.cookies?.[COOKIE_NAME];
@@ -3729,7 +3750,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
   }
   if (config.queueAutoStart) resumableUploads.start();
   return {
-    app, db, runner, conversationTitles, personalMemory, voiceLexicon, config, pumpQueue, remoteWorkers, resumableUploads, waitForBackgroundTasks,
+    app, db, runner, conversationTitles, personalMemory, voiceLexicon, taskboardStore, config, pumpQueue, remoteWorkers, resumableUploads, waitForBackgroundTasks,
     beginShutdown: () => {
       shuttingDown = true;
       reader.stop();

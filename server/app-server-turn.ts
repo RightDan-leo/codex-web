@@ -5,6 +5,13 @@ import { isModelCapacityError, isRetryableUpstreamError } from "./retry-policy.j
 import { buildOptionalCapabilityConfig, type OptionalAgentCapabilities } from "./optional-capabilities.js";
 import { applyCodexProxyEnvironment, CODEX_EGRESS_FALLBACK_NOTICE, resolveCodexEgressChoice, selectCodexEgress, type CodexEgressKind } from "./codex-egress.js";
 import { callWaitDynamicTool, WAIT_DYNAMIC_TOOL_NAME, WAIT_DYNAMIC_TOOL_SPEC, type WaitDynamicToolConfig } from "./wait-dynamic-tool.js";
+import {
+  dynamicToolFailure,
+  dynamicToolResultText,
+  isDynamicToolCallRequest,
+  type DynamicToolHandler,
+  type DynamicToolSpec,
+} from "./app-server-dynamic-tools.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -15,6 +22,7 @@ type AppServerCallbacks = {
   onProgress(payload: unknown): void;
   onContextUsage?(usage: ContextTokenUsage): void;
   onQuotaUsage?(usage: CodexQuotaUsage): void;
+  onDynamicToolCall?: DynamicToolHandler;
 };
 
 export type ContextTokenUsage = {
@@ -30,6 +38,7 @@ export type CodexQuotaUsage = {
 
 export type AppServerTurnOptions = {
   executablePath?: string;
+  appServerArgs?: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
   threadId: string | null;
@@ -48,6 +57,7 @@ export type AppServerTurnOptions = {
   optionalCapabilities: OptionalAgentCapabilities;
   codexEgressKind?: CodexEgressKind;
   waitAutomation?: WaitDynamicToolConfig;
+  dynamicTools?: DynamicToolSpec[];
 };
 
 export type AppServerTurnExecution = {
@@ -95,7 +105,7 @@ class AppServerTurnClient {
       this.resolveCompletion = resolve;
       this.rejectCompletion = reject;
     });
-    this.child = spawn(options.executablePath || process.env.CODEX_RUNTIME_PATH || "codex", ["app-server", "--listen", "stdio://"], {
+    this.child = spawn(options.executablePath || process.env.CODEX_RUNTIME_PATH || "codex", options.appServerArgs ?? ["app-server", "--listen", "stdio://"], {
       cwd: options.cwd,
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -170,12 +180,19 @@ class AppServerTurnClient {
           ...buildOptionalCapabilityConfig(this.options.optionalCapabilities, this.options.prompt),
         },
       };
+      const dynamicTools = [
+        ...(this.options.waitAutomation ? [WAIT_DYNAMIC_TOOL_SPEC] : []),
+        ...(this.options.dynamicTools ?? []),
+      ];
+      if (this.options.threadId && this.options.dynamicTools?.length) {
+        throw new Error("Dynamic tools can only be attached when starting a new Codex thread");
+      }
       const threadResult = this.options.threadId
         ? await this.request("thread/resume", { threadId: this.options.threadId, ...common, excludeTurns: true })
         : await this.request("thread/start", {
             ...common,
             ...(this.options.threadInstructions ? { developerInstructions: this.options.threadInstructions } : {}),
-            ...(this.options.waitAutomation ? { dynamicTools: [WAIT_DYNAMIC_TOOL_SPEC] } : {}),
+            ...(dynamicTools.length ? { dynamicTools } : {}),
           });
       const thread = (threadResult as { thread?: { id?: string } })?.thread;
       if (!thread?.id) throw new Error("Codex app server did not return a thread id");
@@ -237,21 +254,30 @@ class AppServerTurnClient {
   private async handleServerRequest(message: RpcServerRequest): Promise<void> {
     if (!this.child.stdin.writable) return;
     const reply = (result: unknown) => this.child.stdin.write(`${JSON.stringify({ id: message.id, result })}\n`);
-    if (message.method !== "item/tool/call" || !this.options.waitAutomation) {
-      reply({ contentItems: [{ type: "inputText", text: "Unsupported dynamic tool request" }], success: false });
+    if (message.method !== "item/tool/call") {
+      this.child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: "Unsupported server request" } })}\n`);
       return;
     }
-    const params = message.params ?? {};
-    if (params.tool !== WAIT_DYNAMIC_TOOL_NAME) {
-      reply({ contentItems: [{ type: "inputText", text: "Unknown dynamic tool" }], success: false });
-      return;
-    }
+    let result;
     try {
-      const result = await callWaitDynamicTool(this.options.waitAutomation, params.arguments);
-      reply({ contentItems: [{ type: "inputText", text: result }], success: true });
+      if (!isDynamicToolCallRequest(message.params)) throw new Error("Codex app server sent an invalid dynamic tool request");
+      if (message.params.threadId !== this.threadId || message.params.turnId !== this.activeTurnId) {
+        throw new Error("Dynamic tool request does not belong to the active task");
+      }
+      if (!message.params.namespace && message.params.tool === WAIT_DYNAMIC_TOOL_NAME && this.options.waitAutomation) {
+        result = { success: true as const, value: JSON.parse(await callWaitDynamicTool(this.options.waitAutomation, message.params.arguments)) };
+      } else {
+        if (!this.callbacks.onDynamicToolCall) throw new Error("Dynamic tools are unavailable for this task");
+        this.callbacks.onProgress({ kind: "tool", label: "正在调用 Codex Web 内置工具", detail: message.params.tool });
+        result = await this.callbacks.onDynamicToolCall(message.params);
+      }
     } catch (error) {
-      reply({ contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : String(error) }], success: false });
+      result = dynamicToolFailure(error);
     }
+    reply({
+      contentItems: [{ type: "inputText", text: dynamicToolResultText(result) }],
+      success: result.success,
+    });
   }
 
   private handleNotification(message: RpcNotification): void {

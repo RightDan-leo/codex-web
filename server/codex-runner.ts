@@ -20,7 +20,7 @@ import { HostRootWorkerClient } from "./host-root-worker-client.js";
 import type { HostRootRunRequest } from "./host-root-protocol.js";
 import type { CodexAccountLoginView, CodexAccountView } from "./codex-account-manager.js";
 import { loadAccountSkillBundle } from "./account-skills.js";
-import { appendPersonalContextToUserPrompt, buildAgentSteerPrompt, buildAgentTurnPrompt, decideImageInput, isSupportedImageAttachment, type AgentAttachmentContext } from "./agent-context.js";
+import { appendPersonalContextToUserPrompt, buildAgentSteerPrompt, buildAgentTurnPrompt, buildRetainedConversationContext, decideImageInput, isSupportedImageAttachment, type AgentAttachmentContext } from "./agent-context.js";
 import { containsPersonalContext, loadPersonalContextForTurn, stripPersonalContext } from "./personal-context.js";
 import { buildOptionalCapabilityRoutingHint, detectOptionalAgentCapabilities, updateOptionalAgentCapabilities } from "./optional-capabilities.js";
 import { RemoteWorkerGateway, type StoredArtifact } from "./remote-worker-gateway.js";
@@ -31,6 +31,8 @@ import { CODEX_EGRESS_FALLBACK_NOTICE, selectCodexEgress } from "./codex-egress.
 import { appendWaitAutomationInstructions, createJobAutomationToken } from "./wake-automation.js";
 import { cleanupFinalizationDirectory, prepareFinalizationFiles, recoverPreparedFinalization, rollbackUncommittedFinalization, sweepFinalizationOrphans, type FinalizationFileSource } from "./job-finalization.js";
 import { cleanupOwnedStagingDirectory } from "./owned-staging.js";
+import type { TaskboardAgentTools } from "./taskboard-agent-tools.js";
+import { planDynamicToolThread } from "./app-server-dynamic-tools.js";
 
 type Publish = (jobId: string, eventType: string, payload: unknown) => void;
 
@@ -102,7 +104,13 @@ export class CodexRunner {
   private readonly workerClient: TenantWorkerClient | undefined;
   private readonly hostWorkerClient: HostRootWorkerClient;
 
-  constructor(private readonly config: AppConfig, private readonly db: AppDatabase, private readonly publish: Publish, private readonly remoteWorkers: RemoteWorkerGateway) {
+  constructor(
+    private readonly config: AppConfig,
+    private readonly db: AppDatabase,
+    private readonly publish: Publish,
+    private readonly remoteWorkers: RemoteWorkerGateway,
+    private readonly taskboardTools?: TaskboardAgentTools,
+  ) {
     this.workerClient = config.tenantWorkerIsolation ? new TenantWorkerClient() : undefined;
     this.hostWorkerClient = new HostRootWorkerClient(config.hostRootSocketPath);
   }
@@ -485,6 +493,12 @@ export class CodexRunner {
       const hostRoot = isHostRootUser(conversation.user_id);
       const project = conversation.project_id ? this.db.getProjectForUser(conversation.project_id, conversation.user_id) : undefined;
       const remoteWorkerId = project ? workerIdFromExecutor(project.executor_id) : null;
+      const dynamicTools = !hostRoot && !remoteWorkerId ? this.taskboardTools?.specsForUser(conversation.user_id) : undefined;
+      const threadPlan = planDynamicToolThread(
+        conversation.codex_thread_id,
+        conversation.codex_thread_toolset,
+        dynamicTools,
+      );
       const localCodexHome = hostRoot ? this.config.hostRootCodexHome : tenant.codexHome;
       const generatedImagesBeforeThreadId = conversation.codex_thread_id;
       const generatedImagesBefore = !remoteWorkerId && generatedImagesBeforeThreadId
@@ -538,6 +552,10 @@ export class CodexRunner {
         capabilityRoutingHint: optionalCapabilities.remotePlugin ? buildOptionalCapabilityRoutingHint(prompt) : undefined,
         isolationReason: !hostRoot && !remoteWorkerId && taskPolicy.isolated ? taskPolicy.reason : undefined,
         imageInputDecision,
+        taskboardAvailable: Boolean(dynamicTools?.length),
+        retainedConversationContext: threadPlan.migratesLegacyThread
+          ? buildRetainedConversationContext(this.db.listMessages(conversationId), this.db.getJob(jobId)?.message_id)
+          : undefined,
       });
       const remoteUnifiedContext = Boolean(remoteWorkerId && project && this.remoteWorkers.supportsAgentTurnContext(project.executor_id));
       const remoteDynamicWait = Boolean(remoteWorkerId && project && this.remoteWorkers.supportsDynamicWaitTool(project.executor_id));
@@ -552,6 +570,7 @@ export class CodexRunner {
           : undefined,
         capabilityRoutingHint: optionalCapabilities.remotePlugin ? buildOptionalCapabilityRoutingHint(prompt) : undefined,
         isolationReason: !hostRoot && !remoteWorkerId && taskPolicy.isolated ? taskPolicy.reason : undefined,
+        taskboardAvailable: Boolean(dynamicTools?.length),
       });
       const selectedImagePaths = imageInputDecision.preload
         ? uploads.filter((file) => isSupportedImageAttachment(file.original_name, file.mime_type))
@@ -569,7 +588,7 @@ export class CodexRunner {
         workspace,
         runtimeRoot,
         codexHome: tenant.codexHome,
-        codexThreadId: conversation.codex_thread_id,
+        codexThreadId: threadPlan.threadId,
         effectivePrompt,
         imagePaths: selectedImagePaths
           .map((file) => resolveInside(workspace, file.relative_path)),
@@ -579,6 +598,7 @@ export class CodexRunner {
         codexWindowsSandbox: this.config.codexWindowsSandbox,
         optionalCapabilities,
         automation,
+        dynamicTools: threadPlan.dynamicTools,
       };
       const hostRequest: HostRootRunRequest = {
         jobId,
@@ -603,6 +623,7 @@ export class CodexRunner {
           // not make a started turn or its external side effects safe to replay.
           executionObserved = true;
           request.codexThreadId = threadId;
+          request.dynamicTools = undefined;
           hostRequest.codexThreadId = threadId;
           remoteThreadId = threadId;
           // The read-only Remote observer can publish a brand-new thread a few
@@ -610,6 +631,7 @@ export class CodexRunner {
           // Claiming atomically merges that observer placeholder and prevents a
           // second visible conversation for the same project/thread.
           this.db.claimCodexThreadForConversation(conversationId, threadId);
+          if (threadPlan.desiredToolset) this.db.updateConversation(conversationId, { codexThreadToolset: threadPlan.desiredToolset });
           const latest = this.db.getConversation(conversationId);
           if (remoteWorkerId && latest && latest.title_source !== "default") {
             void this.remoteWorkers.renameThread(remoteWorkerId, threadId, latest.title).catch(() => undefined);
@@ -631,6 +653,9 @@ export class CodexRunner {
           if (containsPersonalContext(payload)) return;
           this.publish(jobId, "progress", payload);
         },
+        onDynamicToolCall: dynamicTools?.length
+          ? this.taskboardTools?.handler({ userId: conversation.user_id, executor: { kind: "tenant" } })
+          : undefined,
       };
       if (!remoteWorkerId) {
         const codexEgress = await selectCodexEgress({ signal: controller.signal });

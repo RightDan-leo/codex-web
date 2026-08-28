@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { SupervisorToWebMessage, TenantWorkerEvent, TenantWorkerRunRequest, WebToSupervisorMessage } from "./tenant-worker-protocol.js";
 import type { JobRuntimeCleanupTarget } from "./python-runtime.js";
 import type { CodexQuotaUsage, ContextTokenUsage } from "./app-server-turn.js";
+import { dynamicToolFailure, type DynamicToolHandler } from "./app-server-dynamic-tools.js";
 
 type PendingJob = {
   resolve(finalResponse: string): void;
@@ -10,6 +11,7 @@ type PendingJob = {
   onProgress(payload: unknown): void;
   onContextUsage(usage: ContextTokenUsage): void;
   onQuotaUsage(usage: CodexQuotaUsage): void;
+  onDynamicToolCall?: DynamicToolHandler;
 };
 
 export class TenantWorkerClient {
@@ -112,7 +114,7 @@ export class TenantWorkerClient {
 
   run(
     request: TenantWorkerRunRequest,
-    callbacks: Pick<PendingJob, "onThreadStarted" | "onProgress" | "onContextUsage" | "onQuotaUsage">,
+    callbacks: Pick<PendingJob, "onThreadStarted" | "onProgress" | "onContextUsage" | "onQuotaUsage" | "onDynamicToolCall">,
   ): Promise<string> {
     if (!process.send || !process.connected) return Promise.reject(new Error("Tenant worker isolation is unavailable"));
     if (this.jobs.has(request.jobId)) return Promise.reject(new Error("Tenant worker job already exists"));
@@ -205,6 +207,16 @@ export class TenantWorkerClient {
     if (event.type === "context_usage") pending.onContextUsage(event.usage);
     if (event.type === "quota_usage") pending.onQuotaUsage(event.usage);
     if (event.type === "progress") pending.onProgress(event.payload);
+    if (event.type === "dynamic_tool_call") {
+      void Promise.resolve(pending.onDynamicToolCall?.(event.call)
+        ?? dynamicToolFailure("智能看板工具在当前任务中不可用。"))
+        .catch(dynamicToolFailure)
+        .then((result) => {
+          if (this.jobs.get(jobId) !== pending || !process.send || !process.connected) return;
+          process.send({ kind: "tenant_tool_result", jobId, requestId: event.requestId, result } satisfies WebToSupervisorMessage);
+        });
+      return;
+    }
     if (event.type === "steer_completed" || event.type === "steer_failed") {
       const steer = this.steers.get(event.requestId);
       if (!steer) return;

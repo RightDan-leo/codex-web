@@ -9,6 +9,7 @@ import { isOptionalAgentCapabilities } from "./optional-capabilities.js";
 import { buildTenantProjectThreadInstructions } from "./agent-context.js";
 import { assertTenantProjectRoot } from "./tenant-projects.js";
 import { tenantPaths } from "./paths.js";
+import { validateDynamicToolSpecs, type DynamicToolHandler } from "./app-server-dynamic-tools.js";
 
 type ExecutionCallbacks = {
   signal: AbortSignal;
@@ -17,6 +18,7 @@ type ExecutionCallbacks = {
   onProgress(payload: unknown): void;
   onContextUsage?(usage: ContextTokenUsage): void;
   onQuotaUsage?(usage: CodexQuotaUsage): void;
+  onDynamicToolCall?: DynamicToolHandler;
 };
 
 export async function executeTenantTurn(request: TenantWorkerRunRequest, callbacks: ExecutionCallbacks): Promise<string> {
@@ -70,6 +72,7 @@ export function startTenantTurn(request: TenantWorkerRunRequest, callbacks: Exec
       jobId: request.jobId,
       receiptDirectory: request.automation.receiptDirectory,
     } : undefined,
+    dynamicTools: request.dynamicTools,
   }, callbacks);
 }
 
@@ -109,6 +112,7 @@ export function validateTenantWorkerRequest(
     throw new Error("Invalid worker identifiers");
   }
   if (!isOptionalAgentCapabilities(request.optionalCapabilities)) throw new Error("Invalid optional capabilities");
+  if (request.dynamicTools !== undefined && !validateDynamicToolSpecs(request.dynamicTools)) throw new Error("Invalid dynamic tools");
   if (request.codexEgressKind && !["primary", "backup", "unchanged"].includes(request.codexEgressKind)) throw new Error("Invalid Codex egress");
   const tenantRoot = path.resolve(expectedTenantRoot);
   const expectedWorkspace = path.join(tenantRoot, "conversations", request.conversationId);

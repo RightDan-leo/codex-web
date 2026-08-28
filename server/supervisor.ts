@@ -50,6 +50,14 @@ web.on("message", (message: WebToSupervisorMessage) => {
     }
     return;
   }
+  if (message.kind === "tenant_tool_result") {
+    const worker = workers.get(message.jobId);
+    if (worker?.stdin?.writable) {
+      const input: TenantWorkerInput = { type: "tool_result", requestId: message.requestId, result: message.result };
+      worker.stdin.write(`${JSON.stringify(input)}\n`);
+    }
+    return;
+  }
   if (message.kind === "tenant_cancel") {
     const worker = workers.get(message.jobId);
     if (worker?.stdin?.writable) {

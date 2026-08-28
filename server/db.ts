@@ -39,6 +39,7 @@ export type ConversationRow = {
   title: string;
   title_source: ConversationTitleSource;
   codex_thread_id: string | null;
+  codex_thread_toolset: string | null;
   agent_model: string | null;
   reasoning_effort: string | null;
   status: "idle" | "running";
@@ -837,6 +838,7 @@ export class AppDatabase {
         title TEXT NOT NULL,
         title_source TEXT NOT NULL DEFAULT 'legacy',
         codex_thread_id TEXT,
+        codex_thread_toolset TEXT,
         status TEXT NOT NULL DEFAULT 'idle',
         external_status TEXT NOT NULL DEFAULT 'idle',
         sync_origin TEXT NOT NULL DEFAULT 'codex_web',
@@ -1102,6 +1104,67 @@ export class AppDatabase {
       );
       CREATE INDEX IF NOT EXISTS remote_thread_events_conversation_seq_idx
         ON remote_thread_events(conversation_id,seq);
+      CREATE TABLE IF NOT EXISTS taskboard_projects (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        executor_kind TEXT NOT NULL CHECK(executor_kind IN ('tenant','remote')),
+        remote_project_id TEXT,
+        automation_mode TEXT NOT NULL DEFAULT 'manual' CHECK(automation_mode IN ('manual','assist','auto_low_risk')),
+        max_concurrency INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrency BETWEEN 1 AND 8),
+        preferences TEXT NOT NULL DEFAULT '{}',
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+        archived_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(
+          (executor_kind='tenant' AND remote_project_id IS NULL)
+          OR (executor_kind='remote' AND remote_project_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES taskboard_projects(id) ON DELETE CASCADE,
+        parent_task_id TEXT REFERENCES taskboard_tasks(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'backlog' CHECK(status IN ('backlog','ready','running','review','blocked','done','cancelled')),
+        priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('urgent','high','medium','low')),
+        risk TEXT NOT NULL DEFAULT 'medium' CHECK(risk IN ('low','medium','high')),
+        estimate_points INTEGER CHECK(estimate_points IS NULL OR estimate_points BETWEEN 1 AND 100),
+        acceptance_criteria TEXT NOT NULL DEFAULT '',
+        position INTEGER NOT NULL DEFAULT 1 CHECK(position >= 1),
+        conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+        active_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+        executor_kind TEXT NOT NULL CHECK(executor_kind IN ('tenant','remote')),
+        remote_project_id TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+        archived_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(parent_task_id IS NULL OR parent_task_id<>id),
+        CHECK(
+          (executor_kind='tenant' AND remote_project_id IS NULL)
+          OR (executor_kind='remote' AND remote_project_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_task_dependencies (
+        task_id TEXT NOT NULL REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        depends_on_task_id TEXT NOT NULL REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(task_id, depends_on_task_id),
+        CHECK(task_id<>depends_on_task_id)
+      );
+      CREATE TABLE IF NOT EXISTS taskboard_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL REFERENCES taskboard_projects(id) ON DELETE CASCADE,
+        task_id TEXT REFERENCES taskboard_tasks(id) ON DELETE CASCADE,
+        actor_user_id TEXT NOT NULL REFERENCES users(id),
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
 
     const projectColumns = this.columnNames("projects");
@@ -1148,6 +1211,7 @@ export class AppDatabase {
     if (!conversationColumns.has("archived_at")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN archived_at TEXT");
     if (!conversationColumns.has("deleted_at")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN deleted_at TEXT");
     if (!conversationColumns.has("title_source")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN title_source TEXT NOT NULL DEFAULT 'legacy'");
+    if (!conversationColumns.has("codex_thread_toolset")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN codex_thread_toolset TEXT");
     if (!conversationColumns.has("external_status")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN external_status TEXT NOT NULL DEFAULT 'idle'");
     if (!conversationColumns.has("sync_origin")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN sync_origin TEXT NOT NULL DEFAULT 'codex_web'");
     if (!conversationColumns.has("remote_updated_at")) this.sqlite.exec("ALTER TABLE conversations ADD COLUMN remote_updated_at INTEGER NOT NULL DEFAULT 0");
@@ -1853,6 +1917,8 @@ export class AppDatabase {
       SET status='failed',error='server_restart',completed_at=?,duration_ms=MAX(0,CAST((julianday(?) - julianday(started_at))*86400000 AS INTEGER))
       WHERE status='running'
     `).run(titleAuditRecoveryAt, titleAuditRecoveryAt);
+    const taskboardTaskColumns = this.columnNames("taskboard_tasks");
+    if (!taskboardTaskColumns.has("active_job_id")) this.sqlite.exec("ALTER TABLE taskboard_tasks ADD COLUMN active_job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL");
     this.sqlite.prepare("UPDATE jobs SET queue_seq=rowid WHERE queue_seq IS NULL").run();
     this.suppressImportedControlledTurns();
     this.convergeImportedRemoteAssistantTurns();
@@ -1909,6 +1975,12 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS personal_memory_evidence_message_idx ON personal_memory_evidence(message_id);
       CREATE INDEX IF NOT EXISTS voice_transcriptions_review_idx ON voice_transcriptions(user_id,status,next_attempt_at,submitted_at);
       CREATE INDEX IF NOT EXISTS voice_term_evidence_term_idx ON voice_term_evidence(term_id,created_at);
+      CREATE INDEX IF NOT EXISTS taskboard_projects_user_idx ON taskboard_projects(user_id,archived_at,updated_at);
+      CREATE INDEX IF NOT EXISTS taskboard_tasks_project_idx ON taskboard_tasks(project_id,archived_at,status,position);
+      CREATE UNIQUE INDEX IF NOT EXISTS taskboard_tasks_conversation_idx ON taskboard_tasks(conversation_id) WHERE conversation_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS taskboard_tasks_active_job_idx ON taskboard_tasks(active_job_id) WHERE active_job_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS taskboard_dependencies_reverse_idx ON taskboard_task_dependencies(depends_on_task_id,task_id);
+      CREATE INDEX IF NOT EXISTS taskboard_events_task_idx ON taskboard_events(task_id,id);
     `);
 
     const uploadedFiles = this.sqlite.prepare("SELECT id,original_name FROM files WHERE kind='upload'").all() as Array<{ id: string; original_name: string }>;
@@ -3095,7 +3167,7 @@ export class AppDatabase {
     }
   }
 
-  updateConversation(id: string, fields: { title?: string; titleSource?: ConversationTitleSource; codexThreadId?: string; agentSelection?: StoredAgentSelection; status?: "idle" | "running" }): void {
+  updateConversation(id: string, fields: { title?: string; titleSource?: ConversationTitleSource; codexThreadId?: string; codexThreadToolset?: string | null; agentSelection?: StoredAgentSelection; status?: "idle" | "running" }): void {
     if (fields.title !== undefined) this.sqlite.prepare("UPDATE conversations SET title=?, title_source=COALESCE(?,title_source), updated_at=? WHERE id=?")
       .run(fields.title, fields.titleSource ?? null, new Date().toISOString(), id);
     if (fields.codexThreadId !== undefined) this.sqlite.prepare(`
@@ -3108,6 +3180,8 @@ export class AppDatabase {
         updated_at=?
       WHERE id=?
     `).run(fields.codexThreadId, fields.codexThreadId, fields.codexThreadId, fields.codexThreadId, fields.codexThreadId, new Date().toISOString(), id);
+    if (fields.codexThreadToolset !== undefined) this.sqlite.prepare("UPDATE conversations SET codex_thread_toolset=?, updated_at=? WHERE id=?")
+      .run(fields.codexThreadToolset, new Date().toISOString(), id);
     if (fields.agentSelection !== undefined) this.sqlite.prepare("UPDATE conversations SET agent_model=?, reasoning_effort=?, updated_at=? WHERE id=?").run(
       fields.agentSelection.model, fields.agentSelection.reasoningEffort, new Date().toISOString(), id,
     );
