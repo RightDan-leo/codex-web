@@ -1,3 +1,5 @@
+import { uploadVoice, VoiceUploadError, type VoiceUploadProgress } from "./voice-upload";
+
 export const BASE_PATH = "";
 
 export type MaintenancePhase = "idle" | "preparing" | "active";
@@ -724,16 +726,20 @@ export const api = {
     files.forEach((file) => body.append("files", file));
     return request<PendingMutationResponse>(`/conversations/${id}/messages`, { method: "POST", body });
   },
-  transcribeAudio: (audio: Blob, fileName: string, context: { conversationId?: string; projectId?: string; draftText?: string; attachmentNames?: string[]; purpose?: "composer" | "search"; clientRecordingId?: string } = {}) => {
-    const body = new FormData();
-    body.set("audio", audio, fileName);
-    body.set("conversationId", context.conversationId ?? "");
-    body.set("projectId", context.projectId ?? "");
-    body.set("draftText", context.draftText ?? "");
-    body.set("purpose", context.purpose ?? "composer");
-    body.set("attachmentNames", JSON.stringify(context.attachmentNames ?? []));
-    body.set("clientRecordingId", context.clientRecordingId ?? "");
-    return request<{ text: string; transcriptionId: string }>("/transcriptions", { method: "POST", body });
+  transcribeAudio: async (audio: Blob, fileName: string, context: { conversationId?: string; projectId?: string; draftText?: string; attachmentNames?: string[]; purpose?: "composer" | "search"; clientRecordingId?: string } = {}, options: { onProgress?: (progress: VoiceUploadProgress) => void } = {}) => {
+    try {
+      return await uploadVoice(`${BASE_PATH}/api/transcriptions`, audio, fileName, {
+        conversationId: context.conversationId ?? "",
+        projectId: context.projectId ?? "",
+        draftText: context.draftText ?? "",
+        purpose: context.purpose ?? "composer",
+        attachmentNames: JSON.stringify(context.attachmentNames ?? []),
+        clientRecordingId: context.clientRecordingId ?? "",
+      }, { csrfToken, onProgress: options.onProgress });
+    } catch (error) {
+      if (error instanceof VoiceUploadError && error.status) throw new ApiError(error.message, error.status);
+      throw error;
+    }
   },
   reorderPendingPrompts: (conversationId: string, ids: string[]) => request<{ pendingPrompts: PendingPrompt[] }>(
     `/conversations/${conversationId}/pending-prompts/order`,

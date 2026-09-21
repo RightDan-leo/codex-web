@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Check, LoaderCircle, Mic, RefreshCw, Square, Trash2, X } from "lucide-react";
 import { useVoiceInput, formatVoiceDuration, type UseVoiceInputOptions } from "./useVoiceInput";
 import type { ConversationVoiceState } from "./conversation-types";
+import { voiceUploadLabel } from "../voice-upload";
 
 export type ConversationVoiceInputProps = Omit<UseVoiceInputOptions, "onTranscript" | "onSendAfterTranscription"> & {
   onTranscript: NonNullable<UseVoiceInputOptions["onTranscript"]>;
@@ -35,20 +36,21 @@ export function ConversationVoicePanel({ voice, className, panelClassName, contr
         <canvas ref={voice.waveformRef} aria-label="实时音量波形" />
         <time>{formatVoiceDuration(voice.elapsed)}</time>
         <button type="button" className="voice-stop" onClick={() => voice.finish(false)} aria-label="停止录音并识别" title="停止并转成文字"><Square size={12} fill="currentColor" /></button>
-      </> : <><LoaderCircle className="spin" size={17} /><span>正在识别语音…</span></>}
+      </> : <><LoaderCircle className="spin" size={17} /><span role="status" aria-live="polite">{voiceUploadLabel(voice.uploadProgress)}</span></>}
     </div>}
     <div className={`conversation-voice-wrap ${className ?? ""} ${controlClassName ?? ""}`}>
       {voice.draftRestoring && <span className="voice-draft-restoring" role="status" aria-live="polite"><LoaderCircle className="spin" size={13} />正在恢复未发送语音…</span>}
       {voice.pendingDraft && state === "idle" && <div className="voice-retry-card" role="status" aria-live="polite">
         <Mic size={15} />
-        <span className="voice-retry-copy"><strong>语音未发送，音频已保留</strong><small>{voice.pendingDraft.lastError || "可以重试识别，或删除这段录音。"}</small></span>
+        <span className="voice-retry-copy"><strong>已保留 {voice.pendingDraftCount} 段语音，可继续录音</strong><small>{new Date(voice.pendingDraft.createdAt).toLocaleTimeString()} · {formatVoiceDuration(Math.round(voice.pendingDraft.durationMs / 1000))}</small><small>{voice.pendingDraft.lastError || "可以重试识别，或继续录制新的语音。"}</small></span>
+        {voice.pendingDraftCount > 1 && <button type="button" onClick={voice.nextPending} aria-label="切换保留的语音" title="切换保留的语音">切换</button>}
         <button type="button" onClick={voice.retryPending} aria-label="重试识别语音" title="重试识别语音"><RefreshCw size={14} />重试</button>
         <button type="button" onClick={voice.discardPending} aria-label="删除保留的语音" title="删除保留的语音"><Trash2 size={14} /></button>
       </div>}
       {voice.draftStorageError && <span className="voice-draft-storage-error" role="alert">{voice.draftStorageError}</span>}
       {voice.notice && <span className="voice-notice" role="status" aria-live="polite"><Check size={13} />{voice.notice}</span>}
       {voice.error && <span className={`voice-error ${readerVariant ? "reader-ask-error" : ""}`} role="alert"><span>{voice.error}</span><button type="button" onClick={voice.clearError} aria-label="关闭语音错误"><X size={13} /></button></span>}
-      {state === "idle" && onStart && !voice.pendingDraft && !voice.draftRestoring && <button type="button" className={`mic-button ${micClassName ?? ""} ${className ?? ""}`} onClick={onStart} disabled={micDisabled} aria-label="语音输入" title="语音输入"><Mic size={18} /></button>}
+      {state === "idle" && onStart && !voice.draftRestoring && <button type="button" className={`mic-button ${micClassName ?? ""} ${className ?? ""}`} onClick={onStart} disabled={micDisabled} aria-label="语音输入" title="语音输入"><Mic size={18} /></button>}
     </div>
   </>;
 }

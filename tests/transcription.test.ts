@@ -128,7 +128,8 @@ test("Qwen Omni streams mixed-language text with bounded spelling context", asyn
     assert.equal(imageOptions?.tokenBudget, 500);
     assert.equal(imageOptions?.maxImages, 2);
     assert.equal(submitted.messages[1].content.filter((part: { type: string }) => part.type === "image_url").length, 2);
-    assert.match(submitted.messages[1].content[2].input_audio.data, /\/api\/transcription-audio\/[0-9a-f-]+\.wav/);
+    assert.match(submitted.messages[1].content[2].input_audio.data, /^data:audio\/wav;base64,/);
+    assert.equal(submitted.enable_thinking, false);
     assert.equal(submitted.messages[1].content[2].input_audio.format, "wav");
     assert.match(submitted.messages[1].content[3].text, /不要描述图片/);
     assert.equal(fs.existsSync(path.join(service.audioRoot, fileName.replace(/\.webm$/, ".wav"))), false);
@@ -142,9 +143,7 @@ test("Qwen Omni receives the silence-trimmed WAV and temporary audio is removed"
   let submittedDurationMs = 0;
   const fakeFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     const submitted = JSON.parse(String(init?.body));
-    const audioUrl = new URL(submitted.messages[1].content[0].input_audio.data);
-    const fileName = path.basename(audioUrl.pathname);
-    const audio = fs.readFileSync(path.join(root, "voice-input", fileName));
+    const audio = Buffer.from(submitted.messages[1].content[0].input_audio.data.split(",")[1], "base64");
     submittedDurationMs = Math.round(audio.readUInt32LE(40) / 2 * 1_000 / audio.readUInt32LE(24));
     return new Response('data: {"choices":[{"delta":{"content":"裁剪成功"}}]}\n\ndata: [DONE]\n\n');
   }) as typeof fetch;
@@ -191,6 +190,42 @@ test("Qwen Omni retries transient HTTP and connection failures within a bounded 
     assert.equal(warnings.mock.calls[0].arguments[1].upstreamStatus, 503);
     assert.equal(warnings.mock.calls[0].arguments[1].requestId, "voice-retry-test");
     assert.equal(warnings.mock.calls[1].arguments[1].errorName, "TimeoutError");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("large audio is compressed and sent inline without a public callback", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-inline-"));
+  let encodes = 0;
+  try {
+    const config = testConfig(root);
+    config.publicBaseUrl = "";
+    const service = new TranscriptionService(config, (async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      const audio = body.messages[1].content[0].input_audio;
+      assert.equal(audio.format, "mp3");
+      assert.equal(Buffer.from(audio.data.split(",")[1], "base64").toString(), "test-mp3-bytes");
+      return new Response('data: {"choices":[{"delta":{"content":"成功"}}]}\n\n');
+    }) as typeof fetch, async () => undefined, async () => [], [], async (_input, output) => {
+      encodes++;
+      fs.writeFileSync(output, "test-mp3-bytes");
+    });
+    const name = `${crypto.randomUUID()}.wav`;
+    fs.writeFileSync(path.join(service.audioRoot, name), testWavBuffer(40_000));
+    assert.equal(await service.transcribe(name), "成功");
+    assert.equal(encodes, 1);
+    assert.deepEqual(fs.readdirSync(service.audioRoot), [name]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("compression failure preserves source and removes temporary derivatives", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-inline-fail-"));
+  try {
+    const service = new TranscriptionService(testConfig(root), (async () => { throw Error("must not call provider"); }) as typeof fetch,
+      async () => undefined, async () => [], [], async (_input, output) => { fs.writeFileSync(output, "partial"); throw Error("encoder failed"); });
+    const name = `${crypto.randomUUID()}.wav`;
+    fs.writeFileSync(path.join(service.audioRoot, name), testWavBuffer(40_000));
+    await assert.rejects(service.transcribe(name), /录音压缩失败/);
+    assert.deepEqual(fs.readdirSync(service.audioRoot), [name]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

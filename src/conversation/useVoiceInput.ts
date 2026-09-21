@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { api } from "../api";
+import type { VoiceUploadProgress } from "../voice-upload";
 import type { ConversationVoiceState } from "./conversation-types";
-import { deleteVoiceDraft, getVoiceDraft, purgeExpiredVoiceDrafts, requestPersistentVoiceStorage, saveVoiceDraft, type VoiceDraftRecord } from "./voice-draft-store";
+import { deleteVoiceDraft, listVoiceDrafts, requestPersistentVoiceStorage, saveVoiceDraft, type VoiceDraftRecord } from "./voice-draft-store";
 
 export type UseVoiceInputOptions = {
   accountId?: string | null;
@@ -30,10 +31,13 @@ export type VoiceInputContext = {
 
 export type VoiceInputController = {
   state: ConversationVoiceState;
+  uploadProgress: VoiceUploadProgress | null;
   elapsed: number;
   error: string;
   notice: string;
   pendingDraft: VoiceDraftRecord | null;
+  pendingDraftCount: number;
+  nextPending: () => void;
   draftRestoring: boolean;
   draftStorageError: string;
   transcriptionIds: string[];
@@ -65,10 +69,15 @@ export function formatVoiceDuration(seconds: number): string {
 
 export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputController {
   const [state, setState] = useState<ConversationVoiceState>("idle");
+  const [uploadProgress, setUploadProgress] = useState<VoiceUploadProgress | null>(null);
+  const submittingRef = useRef(false);
+  const startingRef = useRef(false);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingDraft, setPendingDraft] = useState<VoiceDraftRecord | null>(null);
+  const [pendingDraftCount, setPendingDraftCount] = useState(0);
+  const pendingDraftsRef = useRef<VoiceDraftRecord[]>([]);
   const [draftRestoring, setDraftRestoring] = useState(false);
   const [draftStorageError, setDraftStorageError] = useState("");
   const [transcriptionIds, setTranscriptionIds] = useState<string[]>([]);
@@ -101,33 +110,46 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
   optionsRef.current = options;
   pendingDraftRef.current = pendingDraft;
 
+  const replaceDrafts = useCallback((drafts: VoiceDraftRecord[]) => {
+    pendingDraftsRef.current = drafts;
+    pendingDraftRef.current = drafts[0] ?? null;
+    setPendingDraft(drafts[0] ?? null);
+    setPendingDraftCount(drafts.length);
+  }, []);
+  const retainDraft = useCallback((draft: VoiceDraftRecord) => {
+    const current = optionsRef.current;
+    if (draft.accountId !== (current.accountId ?? "") || draft.scope !== (current.draftScope ?? "main-composer") || draft.conversationId !== (current.conversationId ?? null)) return;
+    replaceDrafts([draft, ...pendingDraftsRef.current.filter((item) => item.id !== draft.id)]);
+  }, [replaceDrafts]);
+  const removeDraft = useCallback((id: string) => {
+    replaceDrafts(pendingDraftsRef.current.filter((item) => item.id !== id));
+  }, [replaceDrafts]);
+
   useEffect(() => {
     let cancelled = false;
     const accountId = options.accountId ?? "";
     const scope = options.draftScope ?? "main-composer";
     const conversationId = options.conversationId ?? null;
     if (!options.persistDraft || !accountId) {
-      pendingDraftRef.current = null;
-      setPendingDraft(null);
+      replaceDrafts([]);
       setDraftRestoring(false);
       return;
     }
     setDraftRestoring(true);
     setDraftStorageError("");
-    void purgeExpiredVoiceDrafts()
-      .catch(() => undefined)
-      .then(() => getVoiceDraft(accountId, scope, conversationId))
-      .then((draft) => {
+    replaceDrafts([]);
+    // Unsent recordings are removed only after success or explicit deletion.
+    void listVoiceDrafts(accountId, scope, conversationId)
+      .then((drafts) => {
         if (cancelled) return;
-        pendingDraftRef.current = draft;
-        setPendingDraft(draft);
+        replaceDrafts(drafts);
       })
       .catch((reason) => {
         if (!cancelled) setDraftStorageError(reason instanceof Error ? reason.message : "无法读取本地语音草稿。");
       })
       .finally(() => { if (!cancelled) setDraftRestoring(false); });
     return () => { cancelled = true; };
-  }, [options.accountId, options.conversationId, options.draftScope, options.persistDraft]);
+  }, [options.accountId, options.conversationId, options.draftScope, options.persistDraft, replaceDrafts]);
 
   const release = useCallback(() => {
     if (timerRef.current !== null) window.clearInterval(timerRef.current);
@@ -185,13 +207,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
       setDraftStorageError(reason instanceof Error ? reason.message : "本机无法持久保存语音草稿；请不要关闭页面。");
     }
     if (optionsRef.current.persistDraft) {
-      pendingDraftRef.current = draft;
-      setPendingDraft(draft);
+      retainDraft(draft);
     }
     return draft;
-  }, []);
+  }, [retainDraft]);
 
   const submitDraft = useCallback(async (draft: VoiceDraftRecord, session: VoiceInputContext) => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setUploadProgress({ phase: "reading", percent: 0 });
     const current = optionsRef.current;
     try {
       const result = await api.transcribeAudio(draft.blob, draft.fileName, {
@@ -199,7 +223,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
         draftText: session.draftText,
         attachmentNames: session.attachmentNames,
         clientRecordingId: draft.id,
-      });
+      }, { onProgress: setUploadProgress });
       const nextIds = [...transcriptionIdsRef.current, result.transcriptionId].slice(-20);
       transcriptionIdsRef.current = nextIds;
       setTranscriptionIds(nextIds);
@@ -216,8 +240,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
         try { await deleteVoiceDraft(draft.id); } catch (reason) { setDraftStorageError(reason instanceof Error ? reason.message : "语音草稿清理失败。"); }
       }
       activeDraftRef.current = null;
-      pendingDraftRef.current = null;
-      setPendingDraft(null);
+      removeDraft(draft.id);
       setNotice("");
       setError("");
       changeState("idle");
@@ -229,11 +252,9 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
       const failed = { ...draft, status: "retryable" as const, retryCount: draft.retryCount + 1, lastError: message, updatedAt: new Date().toISOString() };
       activeDraftRef.current = failed;
       if (current.persistDraft) {
-        pendingDraftRef.current = failed;
-        setPendingDraft(failed);
+        retainDraft(failed);
       } else {
-        pendingDraftRef.current = null;
-        setPendingDraft(null);
+        removeDraft(draft.id);
       }
       if (draft.accountId) {
         try { await saveVoiceDraft(failed); } catch (storageReason) { setDraftStorageError(storageReason instanceof Error ? storageReason.message : "本机无法更新语音草稿。"); }
@@ -243,8 +264,11 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
       changeState("idle");
       sessionRef.current = null;
       sessionCallbacksRef.current = null;
+    } finally {
+      submittingRef.current = false;
+      setUploadProgress(null);
     }
-  }, [changeState]);
+  }, [changeState, retainDraft, removeDraft]);
 
   const process = useCallback(async (mimeType: string) => {
     release();
@@ -297,7 +321,8 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
 
   const start = useCallback(async () => {
     const current = optionsRef.current;
-    if (current.disabled || state !== "idle" || pendingDraftRef.current) return;
+    if (current.disabled || state !== "idle" || submittingRef.current || startingRef.current) return;
+    if (draftRestoring) { setError("正在恢复保留的录音，请稍后再开始录音。"); return; }
     setError("");
     setNotice("");
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
@@ -305,6 +330,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
       return;
     }
     try {
+      startingRef.current = true;
       const targetConversationId = current.conversationId ?? null;
       if (transcriptionConversationIdRef.current !== targetConversationId) {
         transcriptionIdsRef.current = [];
@@ -313,6 +339,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
         setTranscriptionConversationId(targetConversationId);
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      streamRef.current = stream;
       const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
       const mimeType = candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -375,8 +402,10 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
       changeState("idle");
       const denied = reason instanceof DOMException && ["NotAllowedError", "PermissionDeniedError"].includes(reason.name);
       setError(denied ? "请允许浏览器使用麦克风，然后再试一次。" : "无法开始录音，请检查麦克风。");
+    } finally {
+      startingRef.current = false;
     }
-  }, [changeState, drawWaveform, process, release, state]);
+  }, [changeState, draftRestoring, drawWaveform, process, release, state]);
 
   // The recording state controls whether the canvas exists. Start drawing only
   // after React has committed that state so the shared panel can actually bind
@@ -420,11 +449,10 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
 
   const retryPending = useCallback(() => {
     const draft = pendingDraftRef.current;
-    if (!draft || state !== "idle") return;
+    if (!draft || state !== "idle" || submittingRef.current) return;
     const retrying = { ...draft, status: "ready" as const, lastError: "", updatedAt: new Date().toISOString() };
-    pendingDraftRef.current = retrying;
+    retainDraft(retrying);
     activeDraftRef.current = retrying;
-    setPendingDraft(retrying);
     setError("");
     setNotice("");
     changeState("transcribing");
@@ -437,18 +465,24 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
     };
     if (retrying.accountId) void saveVoiceDraft(retrying).catch((reason) => setDraftStorageError(reason instanceof Error ? reason.message : "本机无法更新语音草稿。"));
     void submitDraft(retrying, session);
-  }, [changeState, state, submitDraft]);
+  }, [changeState, retainDraft, state, submitDraft]);
 
   const discardPending = useCallback(() => {
     const draft = pendingDraftRef.current;
-    if (!draft) return;
-    pendingDraftRef.current = null;
+    if (!draft || state !== "idle" || submittingRef.current) return;
+    removeDraft(draft.id);
     activeDraftRef.current = null;
-    setPendingDraft(null);
     setError("");
     setNotice("");
     if (draft.accountId) void deleteVoiceDraft(draft.id).catch(() => undefined);
-  }, []);
+  }, [removeDraft, state]);
+
+  const nextPending = useCallback(() => {
+    const drafts = pendingDraftsRef.current;
+    if (state !== "idle" || submittingRef.current || drafts.length < 2) return;
+    replaceDrafts([...drafts.slice(1), drafts[0]]);
+    setError("");
+  }, [replaceDrafts, state]);
 
   useEffect(() => () => {
     discardRef.current = true;
@@ -459,10 +493,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): VoiceInputControll
 
   return {
     state,
+    uploadProgress,
     elapsed,
     error,
     notice,
     pendingDraft,
+    pendingDraftCount,
+    nextPending,
     draftRestoring,
     draftStorageError,
     transcriptionIds,

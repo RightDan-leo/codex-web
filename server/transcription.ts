@@ -10,7 +10,8 @@ import { trimWavSilenceFile } from "./voice-silence.js";
 const execFileAsync = promisify(execFile);
 const AUDIO_NAME = /^[0-9a-f-]{36}\.(webm|ogg|mp4|mp3|wav|aac|flac)$/;
 const MAX_SIGNED_LIFETIME_SECONDS = 5 * 60;
-const TRANSCRIPTION_ATTEMPT_TIMEOUT_MS = 30_000;
+const INLINE_WAV_LIMIT_BYTES = 512 * 1024;
+const INLINE_AUDIO_LIMIT_BYTES = 7 * 1024 * 1024;
 export const TRANSCRIPTION_RETRY_DELAYS_MS = [600, 1_800] as const;
 const OMNI_TRANSCRIPTION_PROMPT = [
   "你是严格的语音转写器。请逐字转写音频中的有效人声。",
@@ -63,6 +64,7 @@ export class TranscriptionService {
     private readonly convertAudio: AudioConverter = convertAudioToWav,
     private readonly imagePreparer: TranscriptionImagePreparer = prepareTranscriptionImages,
     private readonly retryDelaysMs: readonly number[] = TRANSCRIPTION_RETRY_DELAYS_MS,
+    private readonly encodeAudio: AudioConverter = encodeAudioToMp3,
   ) {
     this.audioRoot = path.join(config.dataRoot, "voice-input");
     fs.mkdirSync(this.audioRoot, { recursive: true, mode: 0o700 });
@@ -116,6 +118,7 @@ export class TranscriptionService {
     const imageTokens = contextImages.reduce((total, image) => total + image.tokenCost, 0);
     const textContextBudget = Math.max(0, this.config.transcriptionContextTokenBudget - imageTokens);
     try {
+      const inlineAudio = await this.inlineAudio(prepared.fileName);
       const transcript = await this.requestTranscript(`${this.config.dashscopeBaseUrl}/chat/completions`, {
         method: "POST",
         headers: this.dashscopeHeaders(),
@@ -131,7 +134,7 @@ export class TranscriptionService {
               role: "user",
               content: [
                 ...contextImages.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl } })),
-                { type: "input_audio", input_audio: { data: this.signedAudioUrl(prepared.fileName), format: prepared.format } },
+                { type: "input_audio", input_audio: inlineAudio },
                 {
                   type: "text",
                   text: contextImages.length > 0
@@ -142,6 +145,7 @@ export class TranscriptionService {
             },
           ],
           modalities: ["text"],
+          enable_thinking: false,
           stream: true,
           stream_options: { include_usage: true },
         }),
@@ -152,6 +156,29 @@ export class TranscriptionService {
       if (prepared.temporary) {
         try { fs.rmSync(path.join(this.audioRoot, prepared.fileName), { force: true }); } catch {}
       }
+    }
+  }
+
+  private async inlineAudio(fileName: string): Promise<{ data: string; format: "wav" | "mp3" }> {
+    const wavPath = path.join(this.audioRoot, fileName);
+    const mp3Path = path.join(this.audioRoot, `${crypto.randomUUID()}.mp3`);
+    let inputPath = wavPath;
+    let format: "wav" | "mp3" = "wav";
+    try {
+      if (fs.statSync(wavPath).size > INLINE_WAV_LIMIT_BYTES) {
+        try { await this.encodeAudio(wavPath, mp3Path); }
+        catch { throw new TranscriptionError("录音压缩失败，原录音仍可重试。", 422); }
+        inputPath = mp3Path;
+        format = "mp3";
+      }
+      const size = fs.statSync(inputPath).size;
+      if (!size || size > INLINE_AUDIO_LIMIT_BYTES) throw new TranscriptionError("录音处理后的体积超过识别限制，原录音仍保留。", 413);
+      const bytes = fs.readFileSync(inputPath);
+      // Inline bytes avoid a second, slow public-network download by the provider.
+      // 7 MiB stays below the provider's 10 MB base64 limit, including the prefix.
+      return { data: `data:audio/${format === "mp3" ? "mpeg" : "wav"};base64,${bytes.toString("base64")}`, format };
+    } finally {
+      try { fs.rmSync(mp3Path, { force: true }); } catch {}
     }
   }
 
@@ -200,7 +227,7 @@ export class TranscriptionService {
         const remainingMs = Math.max(1, deadline - Date.now());
         response = await this.fetchImpl(url, {
           ...init,
-          signal: AbortSignal.timeout(Math.min(TRANSCRIPTION_ATTEMPT_TIMEOUT_MS, remainingMs)),
+          signal: AbortSignal.timeout(remainingMs),
         });
       } catch (error) {
         if (await this.retryTransientFailure(attempt, deadline, {
@@ -529,6 +556,13 @@ async function convertAudioToWav(inputPath: string, outputPath: string): Promise
     "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     outputPath,
   ], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+}
+
+async function encodeAudioToMp3(inputPath: string, outputPath: string): Promise<void> {
+  await execFileAsync("ffmpeg", [
+    "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", inputPath,
+    "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "64k", outputPath,
+  ], { timeout: 30_000, maxBuffer: 1024 * 1024 });
 }
 
 function objectAt(value: unknown, key: string): unknown {

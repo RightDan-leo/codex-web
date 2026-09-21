@@ -70,7 +70,7 @@ export async function saveVoiceDraft(record: VoiceDraftRecord): Promise<void> {
   } finally { database.close(); }
 }
 
-export async function getVoiceDraft(accountId: string, scope: string, conversationId: string | null): Promise<VoiceDraftRecord | null> {
+export async function listVoiceDrafts(accountId: string, scope: string, conversationId: string | null): Promise<VoiceDraftRecord[]> {
   const database = await openDatabase();
   try {
     const transaction = database.transaction(STORE_NAME, "readonly");
@@ -82,8 +82,12 @@ export async function getVoiceDraft(accountId: string, scope: string, conversati
     await transactionDone(transaction);
     const candidates = rows.filter((row) => row.accountId === accountId && row.scope === scope && row.conversationId === conversationId);
     candidates.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-    return candidates[0] ?? null;
+    return candidates;
   } finally { database.close(); }
+}
+
+export async function getVoiceDraft(accountId: string, scope: string, conversationId: string | null): Promise<VoiceDraftRecord | null> {
+  return (await listVoiceDrafts(accountId, scope, conversationId))[0] ?? null;
 }
 
 export async function deleteVoiceDraft(id: string): Promise<void> {
