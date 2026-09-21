@@ -163,7 +163,7 @@ async function resolveLinkedSource(
   if (/^file:\/\//i.test(decoded)) {
     try { decoded = fileURLToPath(decoded); }
     catch { return { reason: "missing" }; }
-  } else if (URI_SCHEME.test(decoded)) {
+  } else if (URI_SCHEME.test(decoded) && !(process.platform === "win32" && /^[a-z]:[/\\]/i.test(decoded))) {
     return null;
   }
 

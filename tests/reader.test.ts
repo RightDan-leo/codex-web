@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { linuxIntegration } from "./platform-fixture.js";
 import { BlobWriter, TextReader, ZipWriter } from "@zip.js/zip.js";
 import { loadConfig, READER_V1_MAX_CONCURRENT_READS, READER_V1_MAX_FILE_BYTES, READER_V1_MAX_RANGE_BYTES, READER_V1_RETENTION_DAYS } from "../server/config.js";
 import { AppDatabase, LEGACY_USER_ID, type FileRow } from "../server/db.js";
@@ -336,7 +337,7 @@ test("reader cold candidates honor the 15-day inactivity window and only archive
   } finally { db.close(); }
 });
 
-test("reader normalized resources round-trip through the encrypted cold-storage boundary", (context) => {
+test("reader normalized resources round-trip through the encrypted cold-storage boundary", linuxIntegration, (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "reader-cold-roundtrip-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dataRoot = path.join(root, "data");

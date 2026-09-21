@@ -11,6 +11,7 @@ import {
   type PersonalMemorySourceMessage,
 } from "./db.js";
 import { ensureTenant } from "./paths.js";
+import { atomicWriteFile as atomicWrite } from "./durable-file.js";
 
 const PROMPT_VERSION = "personal-memory-v2";
 const AUTO_MEMORY_FILE = "AUTO.md";
@@ -363,19 +364,6 @@ function redactSecrets(value: string): string {
 
 function sanitizeMemoryMarkdown(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replace(/<!--|-->/g, "").trim();
-}
-
-function atomicWrite(target: string, content: string): void {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, content, { encoding: "utf8", mode: 0o660 });
-    const descriptor = fs.openSync(temporary, "r");
-    try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-    fs.renameSync(temporary, target);
-  } finally {
-    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
-  }
 }
 
 function isRegularFile(target: string): boolean {

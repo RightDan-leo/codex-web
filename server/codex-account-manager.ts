@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { applyCodexProxyEnvironment, selectCodexEgress } from "./codex-egress.js";
 import { copyValidatedCodexAuth, validateCodexAuthPayload, withSharedCodexAuthLock } from "./shared-codex-auth.js";
+import { syncDirectory } from "./durable-file.js";
 
 export type CodexAccountView = {
   id: string;
@@ -56,6 +57,7 @@ type CodexAccountManagerOptions = {
   lockFile: string;
   policyFile: string;
   codexExecutable: string;
+  spawnProcess?: typeof spawn;
   assertSwitchAllowed(): void;
   now?: () => Date;
 };
@@ -208,7 +210,7 @@ export class CodexAccountManager {
         HOME: session.home,
         CODEX_HOME: session.home,
       }, egress.proxyUrl);
-      const child = spawn(this.codexExecutable, [
+      const child = (this.options.spawnProcess ?? spawn)(this.codexExecutable, [
         "login",
         "--device-auth",
         "-c",
@@ -498,8 +500,7 @@ function atomicJsonWrite(file: string, value: unknown, mode: number): void {
     }
     fs.chmodSync(temporary, mode);
     fs.renameSync(temporary, file);
-    const directory = fs.openSync(path.dirname(file), "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    syncDirectory(path.dirname(file));
   } finally {
     fs.rmSync(temporary, { force: true });
   }

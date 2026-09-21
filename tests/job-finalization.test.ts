@@ -9,13 +9,12 @@ import { cleanupFinalizationDirectory, prepareFinalizationFiles, recoverPrepared
 
 test("job finalization streams, hashes, atomically publishes files, and commits metadata once", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-finalization-"));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dataRoot = path.join(root, "data");
   const source = path.join(root, "source.bin");
   const content = Buffer.alloc(4 * 1024 * 1024, 0x5a);
   fs.writeFileSync(source, content);
   const db = new AppDatabase(dataRoot);
-  context.after(() => db.close());
+  context.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const conversation = db.createConversation(crypto.randomUUID(), "finalization");
   const job = db.createJob(crypto.randomUUID(), conversation.id);
   db.updateJob(job.id, "running");
@@ -53,9 +52,8 @@ test("job finalization streams, hashes, atomically publishes files, and commits 
 
 test("terminal Jobs without a recovery journal are published immediately", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-terminal-finalization-"));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const db = new AppDatabase(root, undefined, false);
-  context.after(() => db.close());
+  context.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
 
   const cancelledConversation = db.createConversation(crypto.randomUUID(), "cancelled");
   const cancelled = db.createJob(crypto.randomUUID(), cancelledConversation.id);

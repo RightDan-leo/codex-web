@@ -11,9 +11,8 @@ import { codexVoiceReviewArguments, VOICE_LEXICON_CODEX_MODEL, VOICE_LEXICON_REA
 
 function fixture(t: test.TestContext) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-voice-lexicon-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const db = new AppDatabase(root, undefined, false);
-  t.after(() => db.close());
+  t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const project = db.createProject(crypto.randomUUID(), LEGACY_USER_ID, "Codex Web", path.join(root, "project"));
   const conversation = db.createConversation(crypto.randomUUID(), "语音测试", undefined, LEGACY_USER_ID, project.id);
   return { root, db, project, conversation };

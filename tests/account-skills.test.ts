@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { posixOnly } from "./platform-fixture.js";
 import { ensureAccountSkillLibrary, loadAccountSkillBundle, syncAccountSkills } from "../server/account-skills.js";
 import { HOST_ROOT_USER_ID } from "../server/host-root-user.js";
 
@@ -15,7 +16,7 @@ function seed(root: string): void {
   fs.writeFileSync(path.join(skill, "scripts", "validate.py"), "print('ok')\n", { mode: 0o755 });
 }
 
-test("shared account skill seed installs the same default for every account", (context) => {
+test("shared account skill seed installs the same default for every account", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-account-skills-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const seeds = path.join(root, "seeds");
@@ -39,7 +40,9 @@ test("shared account skill seed installs the same default for every account", (c
   assert.deepEqual(member.skills, owner.skills);
   assert.deepEqual(demo.skills, owner.skills);
   assert.equal(owner.skills[0]?.files.some((file) => file.path === "SKILL.md"), true);
-  assert.equal(owner.skills[0]?.files.find((file) => file.path.endsWith("validate.py"))?.executable, true);
+  await context.test("preserves executable permission on shared skills", posixOnly, () => {
+    assert.equal(owner.skills[0]?.files.find((file) => file.path.endsWith("validate.py"))?.executable, true);
+  });
 
   const ownerHome = path.join(root, "owner-home");
   const memberHome = path.join(root, "member-home");
@@ -99,7 +102,7 @@ test("repository shared account resource contains the enabled HTML report Skill"
   const styleGuide = fs.readFileSync(path.join(skillRoot, "references", "style-guide.md"), "utf8");
   const template = fs.readFileSync(path.join(skillRoot, "assets", "report-template.html"), "utf8");
   const validator = fs.readFileSync(path.join(skillRoot, "scripts", "validate_report.py"), "utf8");
-  assert.match(skill, /^---\nname: html-report\n/);
+  assert.match(skill, /^---\r?\nname: html-report\r?\n/);
   assert.match(skill, /single self-contained UTF-8 HTML file/);
   assert.match(skill, /flat, solid-color visual system/);
   assert.match(styleGuide, /Use only solid color fills/);

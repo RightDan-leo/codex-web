@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
+import { atomicWriteFile as atomicWrite } from "./durable-file.js";
 
 export const PERSONAL_MEMORY_EDITABLE_FILES = ["PROFILE.md", "PREFERENCES.md", "KNOWLEDGE.md", "NOW.md"] as const;
 export type PersonalMemoryEditableFileName = typeof PERSONAL_MEMORY_EDITABLE_FILES[number];
@@ -94,19 +94,6 @@ export function writePersonalMemoryManagedFile(library: string, name: PersonalMe
   if (!personalMemoryEnabled(library)) throw new Error("个人知识尚未启用。");
   if (fs.existsSync(target) && !isRegularFile(target)) throw new Error("个人知识文件不是普通文件，无法编辑。");
   atomicWrite(target, normalizePersonalMemoryFileContent(content));
-}
-
-function atomicWrite(target: string, content: string): void {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, content, { encoding: "utf8", mode: 0o660 });
-    const descriptor = fs.openSync(temporary, "r");
-    try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-    fs.renameSync(temporary, target);
-  } finally {
-    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
-  }
 }
 
 function isRegularFile(target: string): boolean {

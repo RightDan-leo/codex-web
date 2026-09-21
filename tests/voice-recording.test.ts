@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { linuxIntegration } from "./platform-fixture.js";
 import { AppDatabase, LEGACY_USER_ID } from "../server/db.js";
 import { archiveVoiceRecording, defaultColdStorageRoots, listVoiceRecordingCandidates, purgeVoiceRecordingIsolation, restoreVoiceRecording } from "../server/conversation-cold-storage.js";
 import { persistVoiceRecording, sha256File } from "../server/voice-recording.js";
@@ -35,7 +36,7 @@ process.exit(2);
 `);
 }
 
-test("voice audio persists with ownership metadata and round-trips through encrypted cold storage", (t) => {
+test("voice audio persists with ownership metadata and round-trips through encrypted cold storage", linuxIntegration, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-voice-recording-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dataRoot = path.join(root, "data");

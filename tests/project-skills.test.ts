@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createTestSymlink } from "./platform-fixture.js";
 import bcrypt from "bcryptjs";
 import request from "supertest";
 import { createApp } from "../server/app.js";
@@ -32,7 +33,7 @@ test("personal memory onboarding is durable, idempotent, and does not enable fri
   assert.equal(fs.existsSync(path.join(ownerLibrary, "default", "personal")), false);
 });
 
-test("project skills CRUD stays inside a tenant project and rejects symlinks", (context) => {
+test("project skills CRUD stays inside a tenant project and rejects symlinks", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-project-skills-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const project = path.join(root, "project");
@@ -48,14 +49,15 @@ test("project skills CRUD stays inside a tenant project and rejects symlinks", (
   assert.equal(fs.existsSync(path.join(project, ".agents", "skills", ".disabled", "release-check", "SKILL.md")), true);
   assert.equal(setProjectSkillEnabled(project, "release-check", true).enabled, true);
   assert.throws(() => createProjectSkill(project, "../escape", skill("../escape")), /技能名称/);
-  const outside = path.join(root, "outside"); fs.mkdirSync(outside);
-  fs.rmSync(path.join(project, ".agents", "skills"), { recursive: true, force: true });
-  fs.symlinkSync(outside, path.join(project, ".agents", "skills"), "dir");
-  assert.throws(() => listProjectSkills(project), /符号链接/);
-  fs.rmSync(path.join(project, ".agents"), { recursive: true, force: true });
   createProjectSkill(project, "delete-me", skill("delete-me"));
   deleteProjectSkill(project, "delete-me");
   assert.equal(fs.existsSync(path.join(project, ".agents", "skills", "delete-me")), false);
+  await context.test("rejects a symlinked skills directory", (child) => {
+    const outside = path.join(root, "outside"); fs.mkdirSync(outside);
+    fs.rmSync(path.join(project, ".agents", "skills"), { recursive: true, force: true });
+    if (!createTestSymlink(child, outside, path.join(project, ".agents", "skills"), "dir")) return;
+    assert.throws(() => listProjectSkills(project), /符号链接/);
+  });
 });
 
 test("project skill API is owner-scoped and rejects host/remote semantics", async (context) => {

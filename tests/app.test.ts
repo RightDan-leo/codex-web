@@ -5,7 +5,8 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createTestSymlink, linuxIntegration, posixOnly, sharedAuthIntegration } from "./platform-fixture.js";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import bcrypt from "bcryptjs";
@@ -115,7 +116,7 @@ test("app-server notifications from sub-agent threads cannot replace the parent 
   assert.match(source, /if \(!appServerNotificationBelongsToThread\(this\.threadId, params\)\) \{[\s\S]{0,120}this\.handleSubagentNotification\(message\.method, params\);[\s\S]{0,40}return;/);
 });
 
-test("shared Codex auth lease serializes startup and commits only validated rotated credentials", async (context) => {
+test("shared Codex auth lease serializes startup and commits only validated rotated credentials", sharedAuthIntegration, async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shared-codex-auth-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = path.join(root, "shared", "auth.json");
@@ -179,7 +180,7 @@ test("shared Codex auth creates a missing target directory as the tenant identit
   await lease.releaseWithoutCommit();
 });
 
-test("Codex account manager migrates the live login, completes device login, switches globally, and protects the active account", async (context) => {
+test("Codex account manager migrates the live login, completes device login, switches globally, and protects the active account", sharedAuthIntegration, async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-account-manager-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const sharedRoot = path.join(root, "shared-codex-auth");
@@ -196,15 +197,16 @@ test("Codex account manager migrates the live login, completes device login, swi
   fs.writeFileSync(authorityFile, JSON.stringify(auth("account-one", "one@example.com")), { mode: 0o600 });
   const secondAuth = JSON.stringify(auth("account-two", "two@example.com"));
   fs.writeFileSync(executable, [
-    "#!/bin/sh",
-    "printf \"OpenAI's command-line coding agent\\nOpen https://auth.openai.com/codex/device\\nEnter ABCD-EFGHI\\n\"",
-    "mkdir -p \"$CODEX_HOME\"",
-    `printf '%s' '${secondAuth}' > \"$CODEX_HOME/auth.json\"`,
+    "const fs = require('node:fs'); const path = require('node:path');",
+    "console.log(\"OpenAI's command-line coding agent\\nOpen https://auth.openai.com/codex/device\\nEnter ABCD-EFGHI\");",
+    "fs.mkdirSync(process.env.CODEX_HOME, { recursive: true });",
+    `fs.writeFileSync(path.join(process.env.CODEX_HOME, 'auth.json'), ${JSON.stringify(secondAuth)});`,
   ].join("\n"), { mode: 0o700 });
 
   let switchingAllowed = true;
   const manager = new CodexAccountManager({
     authorityFile, lockFile, policyFile, codexExecutable: executable,
+    spawnProcess: (command, args, options) => spawn(process.execPath, [command, ...(args as string[])], options),
     assertSwitchAllowed: () => { if (!switchingAllowed) throw new Error("jobs are running"); },
   });
   context.after(() => manager.close());
@@ -214,7 +216,9 @@ test("Codex account manager migrates the live login, completes device login, swi
   assert.equal(migrated.accounts[0].active, true);
   assert.equal(migrated.accounts[0].email, "one@example.com");
   assert.match(migrated.accounts[0].accountHint, /nt-one$/);
-  assert.equal(fs.statSync(path.join(sharedRoot, "accounts", migrated.activeAccountId, "auth.json")).mode & 0o777, 0o600);
+  await context.test("account credentials retain private POSIX permissions", posixOnly, () => {
+    assert.equal(fs.statSync(path.join(sharedRoot, "accounts", migrated.activeAccountId, "auth.json")).mode & 0o777, 0o600);
+  });
 
   const started = await manager.beginLogin("公司账号");
   let login = started;
@@ -1133,7 +1137,7 @@ test("mobile Safari restores the non-fixed app viewport after the software keybo
 test("the create-project dialog keeps its actions visible while its body scrolls", () => {
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
   const styles = fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8");
-  const dialogSource = appSource.match(/function ProjectDialog\([\s\S]*?\n\}\n\nfunction Welcome/)?.[0] ?? "";
+  const dialogSource = appSource.match(/function ProjectDialog\([\s\S]*?\r?\n\}\r?\n\r?\nfunction Welcome/)?.[0] ?? "";
   assert.match(dialogSource, /<div className="project-dialog-body">[\s\S]*?<\/div>\s*<footer>/);
   assert.match(styles, /\.project-dialog-body \{[^}]*min-height: 0;[^}]*flex: 1 1 auto;[^}]*overflow-y: auto;[^}]*overscroll-behavior-y: contain;[^}]*-webkit-overflow-scrolling: touch;/);
   assert.match(styles, /\.project-dialog > footer \{[^}]*flex: 0 0 auto;/);
@@ -1162,7 +1166,7 @@ test("the mobile personal-memory editor cannot widen its dialog beyond the viewp
 
 test("tenant project creation is name-only while CODEX_WEB keeps directory controls", () => {
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
-  const dialogSource = appSource.match(/function ProjectDialog\([\s\S]*?\n\}\n\nfunction Welcome/)?.[0] ?? "";
+  const dialogSource = appSource.match(/function ProjectDialog\([\s\S]*?\r?\n\}\r?\n\r?\nfunction Welcome/)?.[0] ?? "";
   assert.match(dialogSource, /tenantLocal \? "输入项目名称即可创建。"/);
   assert.doesNotMatch(dialogSource, /在个人知识库根目录下创建或选择一个项目文件夹/);
   assert.doesNotMatch(dialogSource, /executor-boundary-card/);
@@ -1550,7 +1554,8 @@ test("App Server maps root sub-agent metadata and completion summaries into stru
 
 test("App Server folds a tracked child lifecycle into agent progress without replacing the root answer", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-app-server-subagent-"));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // The result can settle before the child process releases its Windows cwd handle.
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const fakeAppServer = path.join(root, "fake-app-server");
   fs.writeFileSync(fakeAppServer, `#!/usr/bin/env node
 const readline = require("node:readline");
@@ -1575,7 +1580,8 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line
   const progress: unknown[] = [];
   const controller = new AbortController();
   const execution = startAppServerTurn({
-    executablePath: fakeAppServer,
+    executablePath: process.execPath,
+    appServerArgs: [fakeAppServer],
     cwd: root,
     env: process.env,
     threadId: null,
@@ -1803,7 +1809,7 @@ test("path confinement rejects traversal", () => {
   assert.equal(safe.displayName, "bad_name_.pptx");
 });
 
-test("tenant knowledge migration creates an idempotent direct-child project boundary", (context) => {
+test("tenant knowledge migration creates an idempotent direct-child project boundary", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-tenant-project-layout-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const tenant = ensureTenant(path.join(root, "tenants"), LEGACY_USER_ID);
@@ -1834,8 +1840,10 @@ test("tenant knowledge migration creates an idempotent direct-child project boun
   assert.equal(fs.existsSync(created.directory), true, "a completed migration must never absorb later sibling projects");
   fs.mkdirSync(path.join(created.directory, "nested"));
   assert.throws(() => validateTenantProjectDirectory(tenant, path.join(created.directory, "nested")), /一级文件夹/);
-  fs.symlinkSync(defaultRoot, path.join(tenant.library, "shortcut"), "dir");
-  assert.throws(() => validateTenantProjectDirectory(tenant, path.join(tenant.library, "shortcut")), /符号链接/);
+  await context.test("rejects symlinked tenant project directories", (child) => {
+    if (!createTestSymlink(child, defaultRoot, path.join(tenant.library, "shortcut"), "dir")) return;
+    assert.throws(() => validateTenantProjectDirectory(tenant, path.join(tenant.library, "shortcut")), /符号链接/);
+  });
   assert.throws(() => createTenantProjectDirectory(tenant, created.directory, "nested-project"), /知识库根目录/);
 });
 
@@ -2050,7 +2058,7 @@ test("agent turn context keeps only current intent, attachments, and conditional
   assert.doesNotMatch(hostInstructions, /\/(?:srv|app|opt|home|root)\//);
 });
 
-test("personal context requires an enabled per-user library and stays bounded", (context) => {
+test("personal context requires an enabled per-user library and stays bounded", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-personal-context-test-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const personal = path.join(root, "personal");
@@ -2059,7 +2067,6 @@ test("personal context requires an enabled per-user library and stays bounded", 
   assert.equal(loadPersonalContext(root), undefined);
   fs.writeFileSync(path.join(personal, "ENABLED"), "schema=v1\n", "utf8");
   fs.writeFileSync(path.join(personal, "PREFERENCES.md"), `# 偏好\n\n## 沟通与解释\n\n默认中文。${"甲".repeat(8_000)}`, "utf8");
-  fs.symlinkSync(path.join(personal, "PROFILE.md"), path.join(personal, "NOW.md"));
   const loaded = loadPersonalContext(root);
   assert.match(loaded ?? "", /稳定事实/);
   assert.match(loaded ?? "", /本节其余内容未注入/);
@@ -2079,6 +2086,12 @@ test("personal context requires an enabled per-user library and stays bounded", 
   assert.equal(containsPersonalContext({ detail: leaked }), true);
   assert.equal(containsPersonalContext({ detail: "正在分析\n## PROFILE.md\n内部摘要" }), true);
   assert.equal(stripPersonalContext(leaked), "阶段说明\n继续");
+  await context.test("does not read personal context through a symlink", (child) => {
+    const outside = path.join(root, "outside.md");
+    fs.writeFileSync(outside, "OUTSIDE_PRIVATE_CONTENT");
+    if (!createTestSymlink(child, outside, path.join(personal, "NOW.md"), "file")) return;
+    assert.doesNotMatch(loadPersonalContext(root) ?? "", /OUTSIDE_PRIVATE_CONTENT/);
+  });
 });
 
 test("personal memory outbox, confidence promotion, rendering, and isolation are deterministic", (context) => {
@@ -2392,8 +2405,10 @@ test("dynamic wait tool stores event credentials only in a protected receipt", a
   assert.match(result, /"reasoningEffort":"xhigh"/);
   assert.doesNotMatch(result, new RegExp(eventToken));
   const receiptPath = path.join(receiptDirectory, `${planId}.json`);
-  assert.equal(fs.statSync(receiptDirectory).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(receiptPath).mode & 0o777, 0o600);
+  await context.test("event credentials retain private POSIX permissions", posixOnly, () => {
+    assert.equal(fs.statSync(receiptDirectory).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(receiptPath).mode & 0o777, 0o600);
+  });
   assert.match(fs.readFileSync(receiptPath, "utf8"), new RegExp(eventToken));
 });
 
@@ -2414,7 +2429,7 @@ test("host root bridge connection failures reject one request without escaping t
 
 test("host root Codex upgrade returns the verified runtime after the managed service finishes", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cww-host-upgrade-result-"));
-  const socketPath = path.join(root, "bridge.sock");
+  const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\codex-web-test-${crypto.randomUUID()}` : path.join(root, "bridge.sock");
   const server = net.createServer((socket) => {
     let input = "";
     socket.setEncoding("utf8");
@@ -4348,7 +4363,8 @@ test("single-user login and CSRF protection", async (context) => {
   assert.equal(projects.body.canManageProjects, true);
   assert.equal(projects.body.projects.length, 1);
   assert.equal(projects.body.projects[0].executor_id, TENANT_LOCAL_EXECUTOR_ID);
-  assert.match(projects.body.projects[0].root_path, /\/library\/default$/);
+  assert.equal(path.basename(projects.body.projects[0].root_path), "default");
+  assert.equal(path.basename(path.dirname(projects.body.projects[0].root_path)), "library");
   const executors = await agent.get("/api/executors").expect(200);
   assert.deepEqual(executors.body.executors.map((executor: { id: string }) => executor.id), [TENANT_LOCAL_EXECUTOR_ID]);
   await agent.post("/api/executors/local-host/runtime/refresh").set("X-CSRF-Token", login.body.csrfToken).expect(403);
@@ -6207,7 +6223,7 @@ test("maintenance deployment templates queue, verify, and publish a clean commit
   assert.match(dockerfile, /COPY account-resources \.\/account-resources/);
 });
 
-test("persisted rebuild coordinator records conflict queue progress and pauses terminal failures", (context) => {
+test("persisted rebuild coordinator records conflict queue progress and pauses terminal failures", linuxIntegration, (context) => {
   if (typeof process.getuid === "function" && process.getuid() !== 0) {
     context.skip("deployment coordinator requires root");
     return;
@@ -6662,11 +6678,11 @@ test("selection and activity recovery reject stale conversations and deduplicate
   assert.equal(isApiErrorStatus(new Error("会话不存在。"), 404), false);
 
   const appSource = fs.readFileSync(path.join(process.cwd(), "src", "App.tsx"), "utf8");
-  const recoveryFlow = appSource.match(/async function recoverMissingConversation[\s\S]*?\n  }\n\n  async function reconcile/)?.[0] ?? "";
+  const recoveryFlow = appSource.match(/async function recoverMissingConversation[\s\S]*?\r?\n  }\r?\n\r?\n  async function reconcile/)?.[0] ?? "";
   assert.match(recoveryFlow, /removeConversationFromPage\(page, id\)/);
   assert.match(recoveryFlow, /refreshList\(false, missingProjectId \?\? activeProjectIdRef\.current, false\)/);
   assert.match(recoveryFlow, /setError\(""\)/);
-  const reconcileFlow = appSource.match(/async function reconcile[\s\S]*?\n  }\n\n  useEffect/)?.[0] ?? "";
+  const reconcileFlow = appSource.match(/async function reconcile[\s\S]*?\r?\n  }\r?\n\r?\n  useEffect/)?.[0] ?? "";
   assert.match(reconcileFlow, /isApiErrorStatus\(reason, 404\)/);
   assert.match(reconcileFlow, /await recoverMissingConversation\(id\)/);
 });

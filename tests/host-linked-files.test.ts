@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { materializeHostLinkedFiles } from "../server/host-linked-files.js";
 
 test("CODEX_WEB host replies promote explicit local file links into output attachments", async (context) => {
@@ -67,4 +68,20 @@ test("host worker materializes linked files before publishing its terminal event
   const source = fs.readFileSync(path.join(process.cwd(), "server", "host-root-job.ts"), "utf8");
   assert.match(source, /materializeHostLinkedFiles\(finalResponse, message\.request\.workspace, message\.request\.knowledgeRoot\)/);
   assert.match(source, /type: "completed", finalResponse: `\$\{linkedFiles\.finalResponse\}\$\{omissionNotice\}`/);
+});
+
+test("host links accept file URLs without treating external URI schemes as local paths", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "host-link-schemes-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(path.join(workspace, "outputs"), { recursive: true });
+  const source = path.join(root, "notes.md");
+  fs.writeFileSync(source, "file URL content");
+  const external = ["https://example.com/notes.md", "custom:notes.md", "C:relative.md"];
+  const response = [`[local](${pathToFileURL(source).href})`, ...external.map((url) => `[external](${url})`)].join("\n");
+  const result = await materializeHostLinkedFiles(response, workspace, root);
+  assert.equal(result.delivered.length, 1);
+  assert.equal(result.omissions.length, 0);
+  assert.equal(fs.readFileSync(path.join(workspace, "outputs", "notes.md"), "utf8"), "file URL content");
+  for (const url of external) assert.ok(result.finalResponse.includes(`[external](${url})`));
 });

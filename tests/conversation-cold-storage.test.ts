@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { linuxIntegration } from "./platform-fixture.js";
 import { AppDatabase, LEGACY_USER_ID, type FileRow } from "../server/db.js";
 import {
   archiveConversation,
@@ -43,7 +44,7 @@ process.exit(2);
 `);
 }
 
-test("archived conversations bypass inactivity and round-trip every unshared registered file", (t) => {
+test("archived conversations bypass inactivity and round-trip every unshared registered file", linuxIntegration, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-conversation-cold-storage-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dataRoot = path.join(root, "data");

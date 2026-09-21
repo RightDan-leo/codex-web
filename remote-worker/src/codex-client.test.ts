@@ -49,7 +49,8 @@ test("sub-agent notifications cannot replace Remote Worker root turn state", () 
 
 test("Remote Worker isolates interleaved sub-agent state while retaining its changed files", async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-worker-app-server-"));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // Process termination is asynchronous; allow Windows to release the cwd handle.
+  context.after(() => fs.promises.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const fakeAppServer = path.join(root, "fake-app-server.js");
   fs.writeFileSync(fakeAppServer, `
     const readline = require("node:readline");
