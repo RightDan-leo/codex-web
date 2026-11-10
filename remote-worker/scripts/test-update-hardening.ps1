@@ -66,31 +66,41 @@ try {
   if ($env:OS -eq "Windows_NT") {
     $processRoot = Join-Path $temporaryRoot "process-identity"
     $mainPath = Join-Path $processRoot "dist\src\main.js"
-    $configPath = Join-Path $processRoot "config.json"
+    # PowerShell variable names are case-insensitive. Keep the fixture path
+    # distinct from the updater's ConfigPath so script invocation cannot shadow it.
+    $fixtureConfigPath = Join-Path $processRoot "config.json"
     $pointerPath = Join-Path $processRoot "worker-current.json"
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $mainPath) | Out-Null
     [System.IO.File]::WriteAllText($mainPath, "setInterval(() => {}, 1000);`n", (New-Object System.Text.UTF8Encoding($false)))
-    [System.IO.File]::WriteAllText($configPath, "{}`n", (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($fixtureConfigPath, "{}`n", (New-Object System.Text.UTF8Encoding($false)))
     [System.IO.File]::WriteAllText($pointerPath, (([ordered]@{ root = $processRoot }) | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
     $global:nodePath = (Get-Command node.exe -ErrorAction Stop).Source
     $global:currentPath = $pointerPath
-    $global:ConfigPath = $configPath
-    $testProcess = Start-Process -FilePath $global:nodePath -ArgumentList @($mainPath, "--config", $configPath) -PassThru -WindowStyle Hidden
+    $global:ConfigPath = $fixtureConfigPath
+    $testProcess = Start-Process -FilePath $global:nodePath -ArgumentList @(('"{0}"' -f $mainPath), "--config", ('"{0}"' -f $fixtureConfigPath)) -PassThru -WindowStyle Hidden
     try {
       for ($attempt = 0; $attempt -lt 20 -and -not (Get-WorkerProcess $testProcess.Id); $attempt++) { Start-Sleep -Milliseconds 100 }
-      [void](Assert-WorkerProcessIdentity $testProcess.Id)
+      if (-not (Assert-WorkerProcessIdentity $testProcess.Id)) {
+        throw "The test Worker process could not be observed; identity checks were not exercised"
+      }
       $global:ConfigPath = Join-Path $processRoot "different-config.json"
       $wrongProcessRejected = $false
       try { [void](Assert-WorkerProcessIdentity $testProcess.Id) }
       catch { $wrongProcessRejected = $_.Exception.Message -match "refusing to terminate" }
       if (-not $wrongProcessRejected) { throw "The updater process guard accepted a different command line" }
     } finally {
-      $global:ConfigPath = $configPath
+      $global:ConfigPath = $fixtureConfigPath
       Stop-Process -Id $testProcess.Id -Force -ErrorAction SilentlyContinue
     }
   }
 } finally {
-  if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
+  $resolvedTemporaryRoot = [System.IO.Path]::GetFullPath($temporaryRoot)
+  $expectedTemporaryParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
+  if ((Split-Path -Parent $resolvedTemporaryRoot) -ne $expectedTemporaryParent -or
+      (Split-Path -Leaf $resolvedTemporaryRoot) -notmatch '^codex-web-worker-hardening-[0-9a-f-]{36}$') {
+    throw "Refusing to remove a test directory outside the expected temporary location"
+  }
+  if (Test-Path -LiteralPath $resolvedTemporaryRoot) { Remove-Item -LiteralPath $resolvedTemporaryRoot -Recurse -Force }
 }
 
 Write-Output "Updater hardening behavior passed with $($PSVersionTable.PSVersion)."
