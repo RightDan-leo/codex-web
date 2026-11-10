@@ -426,14 +426,20 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         client_max_body_size 2048m;
+        client_body_temp_path /var/lib/codex-web-nginx/client-body;
     }
 }
 ```
 
 启用站点。只有确认默认站点没有承载其他业务后，才可以移除它的软链接：
 
+先为 Nginx 的实际工作用户准备独立上传缓冲目录。以下命令适用于工作用户为 `www-data` 的主机；不要改成网页或租户执行器的 UID。详见 [上传缓冲权限检查](docs/UPLOAD_BUFFER_PERMISSIONS.md)。
+
 ```bash
 sudo ln -sfn /etc/nginx/sites-available/codex-web /etc/nginx/sites-enabled/codex-web
+sudo install -d -o root -g root -m 0755 /var/lib/codex-web-nginx
+sudo install -d -o www-data -g www-data -m 0700 /var/lib/codex-web-nginx/client-body
+sudo sh scripts/check-nginx-upload-buffer.sh www-data /var/lib/codex-web-nginx/client-body
 sudo nginx -t
 sudo systemctl reload nginx
 curl -fsS http://codex.example.com/codex-web/api/health
@@ -707,6 +713,7 @@ curl -fsS http://127.0.0.1:37821/codex-web/api/health
 | 页面路径或静态资源 404 | `.env` 的 `BASE_PATH`、`PUBLIC_BASE_URL`、Nginx `location` 是否都是 `/codex-web` | 不要靠任意 rewrite 猜路径 |
 | 流式响应中断 | `proxy_buffering off`、代理超时、上游日志 | 不要关闭认证 |
 | 上传返回 413 | Nginx `client_max_body_size` 与应用上传上限 | 不要无限制放大且不评估磁盘 |
+| 上传返回 500 且没有 upstream 状态 | Nginx client-body 临时目录权限，按工作用户执行写入检查 | 不要递归修改应用数据权限或使用 0777 |
 | Codex 显示未登录 | 是否以 UID 11001 和正确 `HOME`、`CODEX_HOME` 检查 | 不要复制其他用户的 `auth.json` |
 | 证书 HTTP-01 失败 | DNS、80 端口、安全组、UFW、AAAA 可达性 | 不要临时开放应用内部端口 |
 | 容器启动后立即退出 | `docker compose ps`、最近 200 行日志、`.env` 必填项 | 不要打印完整 `.env` |
