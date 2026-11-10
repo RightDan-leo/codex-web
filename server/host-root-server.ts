@@ -504,7 +504,14 @@ function startWorker(socket: Socket, request: HostRootRunRequest): string {
     let event: TenantWorkerEvent;
     try { event = JSON.parse(line) as TenantWorkerEvent; }
     catch { return; }
-    if (event.type === "completed" || event.type === "failed") worker.terminal = true;
+    if (worker.terminal) return;
+    if (event.type === "completed" || event.type === "failed") {
+      try { repairWorkspaceOwnership(workspace, true); }
+      catch {
+        event = { type: "failed", message: "CODEX_WEB 输出权限修复失败，成品已保留，请检查宿主文件权限。", cancelled: false };
+      }
+      worker.terminal = true;
+    }
     send(socket, { type: "event", jobId: request.jobId, event });
   });
   child.on("error", (error) => send(socket, { type: "request_failed", message: error.message }));
@@ -647,13 +654,16 @@ function clearTimers(worker: { timers: NodeJS.Timeout[] }): void {
   worker.timers.length = 0;
 }
 
-function repairWorkspaceOwnership(workspace: string): void {
+function repairWorkspaceOwnership(workspace: string, required = false): void {
   for (const [command, args] of [
     ["chown", ["-R", `${webUid}:${webGid}`, "--", workspace]],
     ["chmod", ["-R", "u+rwX", "--", workspace]],
   ] as const) {
     const result = spawnSync(command, args, { stdio: "ignore" });
-    if (result.status !== 0) process.stderr.write(`Failed to repair CODEX_WEB workspace with ${command}\n`);
+    if (result.status !== 0) {
+      if (required) throw new Error("Workspace ownership repair failed");
+      process.stderr.write(`Failed to repair CODEX_WEB workspace with ${command}\n`);
+    }
   }
 }
 
