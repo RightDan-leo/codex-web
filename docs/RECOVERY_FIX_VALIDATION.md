@@ -28,6 +28,27 @@ the web UID initially cannot read it, and verifies readability at terminal-event
 publication before child exit. It is skipped on non-root/non-Linux hosts.
 The Nginx directory probe test likewise requires Linux root and `runuser`.
 
+### Windows PowerShell gate follow-up
+
+The initial PR CI matrix passed on Windows and Linux with Node 22 and 24,
+but the separate PowerShell gate failed in its wrong-process fixture. The
+fixture declared `configPath` in script scope and changed `global:ConfigPath`.
+PowerShell names are case-insensitive: when invoked as a script by the CI
+wrapper, the fixture's original script variable shadowed the changed global
+value. The guard still received the matching path, so the negative test never
+exercised a mismatched configuration. Direct `powershell -File` invocation did
+not reproduce that scope arrangement. The affected test was unchanged from
+the main baseline; this failure did not establish an updater guard bypass.
+
+The fixture now uses a distinct name, requires a live observable test process,
+quotes process arguments, and checks the temporary cleanup boundary. The
+production updater is unchanged. Local Windows PowerShell 5.1 and PowerShell 7
+both pass using the CI-style script invocation, covering acceptance of the
+matching process and rejection of the mismatched configuration. A local Windows
+`npm test` rerun also passed: 354 passed, zero failed, 14 platform-specific
+skips (368 total). The updated commit must still pass the GitHub PowerShell
+gate before merge.
+
 These tests cover async acknowledgement, a lost response, reusing saved text
 without reupload, duplicate uploads, content mismatch, failure receipts,
 authentication and cross-account isolation. They do not prove mobile browser
