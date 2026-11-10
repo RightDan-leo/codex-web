@@ -149,7 +149,8 @@ test("proxy HTML errors and malformed successes remain failures, preserving the 
   }
 });
 
-test("API integration retains endpoint, CSRF, retry ID, context and ApiError status", async () => {
+test("API integration retains endpoint, CSRF, retry ID, context and ApiError status", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response('{"error":"not received"}', { status: 404 }));
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "XMLHttpRequest");
   const xhr = new FakeRequest();
   Object.defineProperty(globalThis, "XMLHttpRequest", { configurable: true, value: function () { return xhr; } });
@@ -162,6 +163,7 @@ test("API integration retains endpoint, CSRF, retry ID, context and ApiError sta
     assert.equal(fields.get("clientRecordingId"), recordingId);
     assert.equal(fields.get("draftText"), "保留草稿");
     assert.equal(fields.get("conversationId"), "conv");
+    assert.equal(fields.get("async"), "true");
     xhr.status = 403;
     xhr.responseText = '{"error":"会话校验失败"}';
     await assert.rejects(api.transcribeAudio(audio(), "recording.mp4"), (error) => error instanceof ApiError && error.status === 403 && error.message === "会话校验失败");
@@ -176,4 +178,25 @@ test("voice phase labels do not call a stalled upload recognition", () => {
   assert.equal(voiceUploadLabel({ phase: "reading", percent: 0 }), "正在读取录音…");
   assert.equal(voiceUploadLabel({ phase: "uploading", percent: 42 }), "正在上传录音 42%…");
   assert.equal(voiceUploadLabel({ phase: "recognizing", percent: 100 }), "正在识别语音…");
+});
+
+test("async upload accepts 202, and lost acknowledgements settle for receipt recovery", async () => {
+  const xhr = new FakeRequest();
+  xhr.status = 202;
+  xhr.responseText = '{"state":"processing"}';
+  assert.deepEqual(await uploadVoice("/api/transcriptions", audio(), "a.mp4", { async: "true" }, { createRequest: xhr.asRequest }), { state: "processing" });
+  const lost = new FakeRequest();
+  lost.action = current => current.uploadComplete();
+  await assert.rejects(uploadVoice("/api/transcriptions", audio(), "a.mp4", { async: "true" }, {
+    createRequest: lost.asRequest, acknowledgementTimeoutMs: 5,
+  }), /上传确认中断/);
+  assert.equal(lost.aborted, true);
+});
+
+test("API recovers an existing transcript without reading or uploading a retained Blob", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ state: "succeeded", text: "saved", transcriptionId: "existing" })));
+  const unreadable = { size: 10, arrayBuffer: async () => { throw new Error("must not read"); } } as Blob;
+  const result = await api.transcribeAudio(unreadable, "a.mp4", { clientRecordingId: recordingId });
+  assert.equal(result.text, "saved");
+  assert.equal(result.transcriptionId, "existing");
 });

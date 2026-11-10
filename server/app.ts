@@ -3010,7 +3010,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
         callback(null, `${crypto.randomUUID()}${AUDIO_MIME_EXTENSIONS[mime] ?? ""}`);
       },
     }),
-    limits: { files: 1, fileSize: 15 * 1024 * 1024, fields: 6, fieldSize: 10 * 1024 },
+    limits: { files: 1, fileSize: 15 * 1024 * 1024, fields: 7, fieldSize: 10 * 1024 },
     fileFilter(_req, file, callback) {
       const mime = file.mimetype.toLowerCase().split(";", 1)[0];
       callback(null, Boolean(AUDIO_MIME_EXTENSIONS[mime]));
@@ -3026,10 +3026,28 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
     message: { error: "语音识别请求过于频繁，请稍后再试。" },
   });
 
+  api.get("/transcriptions/recordings/:recordingId", (req, res) => {
+    const userId = (res.locals.session as SessionRow).user_id;
+    const recordingId = String(req.params.recordingId);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recordingId)) {
+      return res.status(400).json({ error: "语音录音 ID 无效。" });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    const completed = db.getVoiceTranscriptionByClientRecordingId(userId, recordingId);
+    if (completed) return res.json({ state: "succeeded", text: completed.raw_text, transcriptionId: completed.id });
+    const receipt = db.getVoiceTranscriptionReceipt(userId, recordingId);
+    if (!receipt) return res.status(404).json({ error: "尚未收到这段语音。" });
+    if (receipt.state === "processing" && voiceTranscriptionInFlight.has(`${userId}:${recordingId}`)) {
+      return res.status(202).json({ state: "processing" });
+    }
+    return res.json({ state: "failed", error: receipt.last_error || "识别已中断，录音已保留，请重试。" });
+  });
+
   api.post("/transcriptions", transcriptionLimiter, voiceUpload.single("audio"), async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ error: "没有收到可识别的录音，请重新录制。" });
     let persistedAudio: PersistedVoiceRecording | undefined;
+    let detached = false;
     try {
       const session = res.locals.session as SessionRow;
       const clientRecordingId = typeof req.body?.clientRecordingId === "string" ? req.body.clientRecordingId.trim() : "";
@@ -3110,6 +3128,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
       if (receipt && (receipt.audio_bytes !== audioBytes || receipt.audio_sha256 !== audioSha256)) return res.status(409).json({ error: "同一录音 ID 对应了不同音频内容。" });
       if (receipt?.state === "processing") {
         const pending = voiceTranscriptionInFlight.get(`${session.user_id}:${clientRecordingId}`);
+        if (pending && req.body?.async === "true") return res.status(202).json({ state: "processing" });
         if (pending) return res.json(await pending);
         return res.status(409).json({ error: "这段语音正在识别，请稍后重试。" });
       }
@@ -3121,6 +3140,19 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
       const key = `${session.user_id}:${clientRecordingId}`;
       const pending = runTranscription();
       voiceTranscriptionInFlight.set(key, pending);
+      if (req.body?.async === "true") {
+        detached = true;
+        trackBackground("voice_transcription", pending.then(() => undefined).catch(() => {
+          // runTranscription persists the error for receipt queries.
+          if (persistedAudio) {
+            try { removePersistedVoiceRecording(config.dataRoot, persistedAudio.relativePath); } catch {}
+          }
+        }).finally(() => {
+          voiceTranscriptionInFlight.delete(key);
+          try { fs.rmSync(file.path, { force: true }); } catch {}
+        }));
+        return res.status(202).json({ state: "processing" });
+      }
       try { return res.json(await pending); }
       finally { voiceTranscriptionInFlight.delete(key); }
     } catch (error) {
@@ -3130,7 +3162,7 @@ export function createApp(overrides: Partial<AppConfig> = {}) {
       const status = error instanceof TranscriptionError ? error.status : error instanceof Error && error.message.includes("同一录音 ID") ? 409 : 502;
       return res.status(status).json({ error: error instanceof Error ? error.message : "语音识别失败，请重试。" });
     } finally {
-      try { fs.rmSync(file.path, { force: true }); } catch {}
+      if (!detached) { try { fs.rmSync(file.path, { force: true }); } catch {} }
     }
   });
 

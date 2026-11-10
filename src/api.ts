@@ -1,4 +1,5 @@
 import { uploadVoice, VoiceUploadError, type VoiceUploadProgress } from "./voice-upload";
+import { recoverableTranscription, type TranscriptReceipt } from "./transcription-recovery";
 
 export const BASE_PATH = "";
 
@@ -727,15 +728,33 @@ export const api = {
     return request<PendingMutationResponse>(`/conversations/${id}/messages`, { method: "POST", body });
   },
   transcribeAudio: async (audio: Blob, fileName: string, context: { conversationId?: string; projectId?: string; draftText?: string; attachmentNames?: string[]; purpose?: "composer" | "search"; clientRecordingId?: string } = {}, options: { onProgress?: (progress: VoiceUploadProgress) => void } = {}) => {
+    const recordingId = context.clientRecordingId || crypto.randomUUID();
     try {
-      return await uploadVoice(`${BASE_PATH}/api/transcriptions`, audio, fileName, {
-        conversationId: context.conversationId ?? "",
-        projectId: context.projectId ?? "",
-        draftText: context.draftText ?? "",
-        purpose: context.purpose ?? "composer",
-        attachmentNames: JSON.stringify(context.attachmentNames ?? []),
-        clientRecordingId: context.clientRecordingId ?? "",
-      }, { csrfToken, onProgress: options.onProgress });
+      return await recoverableTranscription({
+        read: async () => {
+          try {
+            const receipt = await request<TranscriptReceipt>(`/transcriptions/recordings/${encodeURIComponent(recordingId)}`, { signal: AbortSignal.timeout(10_000) });
+            options.onProgress?.({ phase: "recognizing", percent: 100 });
+            return receipt;
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 404) return null;
+            throw error;
+          }
+        },
+        upload: () => uploadVoice(`${BASE_PATH}/api/transcriptions`, audio, fileName, {
+          conversationId: context.conversationId ?? "",
+          projectId: context.projectId ?? "",
+          draftText: context.draftText ?? "",
+          purpose: context.purpose ?? "composer",
+          attachmentNames: JSON.stringify(context.attachmentNames ?? []),
+          clientRecordingId: recordingId,
+          async: "true",
+        }, { csrfToken, onProgress: options.onProgress }),
+        retryable: error => {
+          if (error instanceof VoiceUploadError) return error.status === 0 || error.status >= 500 || error.status === 408 || error.status === 429;
+          return !(error instanceof ApiError) || error.status >= 500 || error.status === 408 || error.status === 429;
+        },
+      });
     } catch (error) {
       if (error instanceof VoiceUploadError && error.status) throw new ApiError(error.message, error.status);
       throw error;

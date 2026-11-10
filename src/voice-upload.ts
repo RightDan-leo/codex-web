@@ -74,8 +74,9 @@ export async function uploadVoice(
     createRequest?: () => XMLHttpRequest;
     uploadIdleTimeoutMs?: number;
     requestTimeoutMs?: number;
+    acknowledgementTimeoutMs?: number;
   } = {},
-): Promise<{ text: string; transcriptionId: string }> {
+): Promise<{ text: string; transcriptionId: string } | { state: "processing" }> {
   options.onProgress?.({ phase: "reading", percent: 0 });
   const multipart = await prepareVoiceMultipart(audio, fileName, fields);
   return new Promise((resolve, reject) => {
@@ -84,8 +85,10 @@ export async function uploadVoice(
     let uploaded = false;
     let lastLoaded = 0;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let acknowledgementTimer: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
       clearTimeout(idleTimer);
+      clearTimeout(acknowledgementTimer);
       xhr.onload = xhr.onerror = xhr.ontimeout = xhr.onabort = null;
       xhr.upload.onprogress = xhr.upload.onload = null;
     };
@@ -117,6 +120,9 @@ export async function uploadVoice(
         uploaded = true;
         clearTimeout(idleTimer);
         options.onProgress?.({ phase: "recognizing", percent: 100 });
+        if (fields.async === "true") {
+          acknowledgementTimer = setTimeout(() => fail(new VoiceUploadError("上传确认中断，正在查询识别结果。")), options.acknowledgementTimeoutMs ?? 15_000);
+        }
       };
       xhr.onerror = () => fail(new VoiceUploadError(uploaded
         ? "获取识别结果时连接中断，请重试，原录音未删除。"
@@ -127,7 +133,7 @@ export async function uploadVoice(
       xhr.onabort = () => fail(new VoiceUploadError("语音请求已中断，原录音未删除。"));
       xhr.onload = () => {
         if (settled) return;
-        let result: { error?: unknown; text?: unknown; transcriptionId?: unknown } | null = null;
+        let result: { error?: unknown; text?: unknown; transcriptionId?: unknown; state?: unknown } | null = null;
         try { result = JSON.parse(xhr.responseText); } catch { /* Proxy errors may be HTML. */ }
         if (xhr.status < 200 || xhr.status >= 300) {
           const fallback = xhr.status === 408 ? "录音上传超时，请重试，原录音未删除。"
@@ -135,6 +141,12 @@ export async function uploadVoice(
             : xhr.status === 401 ? "登录已过期，请重新登录后重试。"
             : `语音请求失败 (${xhr.status})，请重试。`;
           fail(new VoiceUploadError(typeof result?.error === "string" ? result.error : fallback, xhr.status));
+          return;
+        }
+        if (fields.async === "true" && xhr.status === 202 && result?.state === "processing") {
+          settled = true;
+          cleanup();
+          resolve({ state: "processing" });
           return;
         }
         if (typeof result?.text !== "string" || !result.text.trim() || typeof result.transcriptionId !== "string" || !result.transcriptionId) {

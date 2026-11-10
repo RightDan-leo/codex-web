@@ -16,9 +16,10 @@ read byte count matches the Blob size. It then builds an in-memory multipart
 ArrayBuffer and sends those bytes with XMLHttpRequest. Neither a restored Blob
 nor a File is handed to the native multipart upload implementation.
 
-The endpoint, six form fields, MIME types, same-origin login cookies and CSRF
-header remain compatible with the existing transcription route. No server
-schema, API key, provider, base path or proxy timeout changes are required.
+The endpoint, existing six form fields, MIME types, same-origin login cookies
+and CSRF header are retained. New clients add `async=true` (the route accepts
+seven fields); old clients can still wait synchronously. No server schema,
+API key, provider, base path or proxy timeout changes are required.
 
 The composer shows reading, uploading (real byte progress), and recognizing as
 separate phases. Upload progress measures browser transmission, not a server
@@ -27,6 +28,23 @@ request timer bound stalled requests. Only byte advancement resets the upload
 watchdog, and completing the upload clears that watchdog. There is no automatic
 resubmission. Manual retries keep the original recording ID, conversation and
 draft text; concurrent retry clicks cannot create multiple active submissions.
+
+Async recognition acknowledges a complete upload with HTTP 202. The client
+first queries its account-scoped `GET /api/transcriptions/recordings/:id`
+receipt, and uploads only if there is no pending/completed result. After
+acceptance, or a lost upload response, short GET requests recover the saved
+result. Upload acknowledgement has a 15-second deadline after byte transfer;
+each GET has a 10-second deadline and polling is bounded to three minutes.
+Provider failures stop polling and preserve the draft for a manual retry.
+The original byte-materialization path remains in use for restored mobile
+recordings. A retry can retrieve a completed transcript without reading the Blob.
+
+Receipt queries require authentication and return only the current user's
+recording. Duplicate uploads still check the audio hash and byte count.
+Recognition runs as a tracked background task, retaining its temporary input
+until it settles; graceful shutdown waits for it. After an interrupted server
+process, the existing receipt recovery marks unfinished work failed, so the
+retained client recording can be retried instead of spinning indefinitely.
 
 Failures do not delete or replace the source audio draft. A malformed HTTP 200
 response is a failure, not permission to delete the draft. Unsent drafts remain
@@ -51,6 +69,8 @@ Review only these files when transferring the fix to another deployed version:
 
 - `src/voice-upload.ts` (new)
 - `src/api.ts` (transcription transport only; retain the destination BASE_PATH)
+- `src/transcription-recovery.ts` (receipt lookup and bounded recovery)
+- `server/app.ts` (receipt endpoint, async acceptance and upload field count)
 - `src/conversation/useVoiceInput.ts`
 - `src/conversation/ConversationVoiceInput.tsx`
 - `tests/voice-upload.test.ts` (new)
@@ -58,8 +78,12 @@ Review only these files when transferring the fix to another deployed version:
 
 Do not replace an entire checkout or publish an unrelated local build. Compare
 the deployed source, preserve unrelated changes, and retain the prior release
-for rollback. The new client is compatible with the existing API; build and
-publish it through the destination's verified deployment process.
+for rollback. Build and publish through the destination's verified deployment
+process; the server retains compatibility with synchronous clients.
+
+For the async receipt extension, deploy the matching server change before
+publishing the new client. Preserve unrelated source changes; the public branch
+and a customized deployment may use different upload implementations.
 
 Phone acceptance must cover a new recording, retry of a retained recording,
 and restoring a recording after reload, on mobile data. Keep the page foreground
